@@ -258,21 +258,85 @@ The system MUST provide SDKs and integration points for Agent frameworks.
 - WHEN an Agent in the same pod calls localhost:8080/v1/check
 - THEN authorization is performed with < 1ms network overhead
 
+---
+
+### Requirement: R11 — Token Service / Authentication
+
+The system MUST support multiple authentication methods and issue JWT tokens.
+
+#### Scenario: API Key authentication
+- GIVEN a valid API Key (format: `ak_{env}_{random32}`)
+- WHEN included as `Authorization: Bearer ak_dev_xxx`
+- THEN the request is authenticated and the client identity is resolved
+
+#### Scenario: OAuth 2.0 Client Credentials
+- GIVEN a registered OAuth client (client_id + client_secret)
+- WHEN `POST /v1/oauth/token` with `grant_type=client_credentials`
+- THEN return a JWT Access Token (typ: at+jwt, RFC 9068)
+- WITH requested OAuth scopes (agentiam:authorize, agentiam:session:create, etc.)
+
+#### Scenario: JWT Access Token validation
+- GIVEN a JWT Access Token
+- WHEN it is presented in the Authorization header
+- THEN verify signature (HS256/RS256), check expiration, extract scopes
+- AND enforce scope against the requested API endpoint
+
+#### Scenario: JWT Session Token with Cedar Entity UID
+- GIVEN a delegation session is created
+- THEN the Session Token's `sub` claim contains the Cedar entity UID (e.g. `AgentIAM::Agent::"research-scout"`)
+- AND `delegator` claim contains the User's Cedar entity UID
+- AND `scope` contains Cedar action UIDs
+- SO THAT authorization can map directly to Cedar without translation
+
+#### Scenario: Token revocation
+- GIVEN a session token's jti is added to the revocation list
+- WHEN the token is presented for validation
+- THEN validation fails with "token_revoked"
+
+#### Scenario: OAuth 2.0 Authorization Code + PKCE (Phase 2)
+- GIVEN a user wants to authorize an Agent via browser
+- WHEN the OAuth authorization code flow with PKCE completes
+- THEN an Access Token is issued with the user's identity
+
+#### Scenario: OIDC Token Exchange (Phase 2)
+- GIVEN an external IdP (Cognito/Keycloak/Auth0) issued an ID Token
+- WHEN `POST /v1/oauth/token` with `grant_type=token-exchange`
+- THEN verify the external token, map identity to AgentIAM User, issue Access Token
+
+---
+
+### Requirement: R12 — MCP Gateway (Phase 2)
+
+The system MUST provide a transparent proxy for MCP protocol tool invocations.
+
+#### Scenario: Transparent tool interception
+- GIVEN an Agent calls a Tool through the MCP Gateway
+- THEN the Gateway intercepts the call, performs authorization check, and forwards if allowed
+
+#### Scenario: Tool capability auto-registration
+- GIVEN an MCP Server connects to the Gateway
+- THEN its tools and capabilities are automatically registered with risk levels
+
+#### Scenario: Real-time budget deduction
+- GIVEN a tool call is forwarded and completes
+- THEN the Gateway deducts token/cost/call usage from the session budget
+
 ## Technical Constraints
 
-- Policy engine: Cedar (Rust) — embedded via FFI or subprocess
-- Primary language: Go or Rust
+- Policy engine: Cedar (Rust) — embedded via FFI, WASM, or subprocess
+- Primary language: Go (with Rust FFI for Cedar)
 - Storage: SQLite (MVP) → PostgreSQL (production)
-- Session state: In-memory + optional Redis
-- API: REST (JSON), gRPC (future)
-- Auth: JWT session tokens
-- Audit: Append-only SQLite/PostgreSQL table → S3 archival (future)
+- Session state: In-memory + SQLite (MVP) → Redis (production)
+- API: REST JSON (Phase 1), gRPC (Phase 2+)
+- Auth: API Key + OAuth 2.0 Client Credentials (Phase 1), Auth Code + OIDC (Phase 2)
+- JWT: HS256 (Phase 1), RS256 + JWKS (Phase 2), KMS (Phase 3)
+- Audit: Append-only SQLite table → PostgreSQL + S3 archival (production)
 
 ## Phased Delivery
 
 | Phase | Scope | Timeline |
 |-------|-------|----------|
-| Phase 1 (MVP) | R1 + R2 + R3 + R7 (basic) | 6 weeks |
-| Phase 2 (Usable) | R4 + R5 + R6 + R8 + R9 | 6 weeks |
-| Phase 3 (Production) | Web Console + Multi-tenant + OPAL | 8 weeks |
-| Phase 4 (Ecosystem) | Framework plugins + MCP standard | Ongoing |
+| Phase 1 (MVP) | R1 + R2 + R3 + R7 + R11 (API Key + OAuth CC + HS256) | 6 weeks |
+| Phase 2 (Usable) | R4 + R5 + R6 + R8 + R9 + R11 (OIDC) + R12 (MCP Gateway) | 6 weeks |
+| Phase 3 (Production) | Web Console + Multi-tenant + OPAL + mTLS + KMS | 8 weeks |
+| Phase 4 (Ecosystem) | Framework plugins + MCP standard proposal | Ongoing |
