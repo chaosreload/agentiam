@@ -1,0 +1,521 @@
+openapi: 3.1.0
+info:
+  title: AgentIAM API
+  description: The authorization layer for AI Agents
+  version: 0.1.0
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+  contact:
+    name: AgentIAM
+    url: https://github.com/chaosreload/agentiam
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+security:
+  - ApiKeyAuth: []
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: http
+      scheme: bearer
+      description: API Key (Bearer token)
+
+  schemas:
+    EntityRef:
+      type: object
+      required: [type, id]
+      properties:
+        type:
+          type: string
+          example: "AgentIAM::Agent"
+        id:
+          type: string
+          example: "research-scout"
+        attrs:
+          type: object
+          description: Optional inline attributes
+        parents:
+          type: array
+          items:
+            $ref: '#/components/schemas/EntityRef'
+
+    Decision:
+      type: object
+      required: [decision, diagnostics]
+      properties:
+        decision:
+          type: string
+          enum: [ALLOW, DENY]
+        diagnostics:
+          type: object
+          properties:
+            reason:
+              type: string
+            policies_satisfied:
+              type: array
+              items: { type: string }
+            policies_denied:
+              type: array
+              items: { type: string }
+            policies_evaluated:
+              type: integer
+            errors:
+              type: array
+              items: { type: string }
+            evaluation_time_us:
+              type: integer
+            scope_violation:
+              type: boolean
+
+    BudgetStatus:
+      type: object
+      properties:
+        max_tokens: { type: integer }
+        remaining_tokens: { type: integer }
+        max_cost_cents: { type: integer }
+        remaining_cost_cents: { type: integer }
+        max_calls: { type: integer }
+        remaining_calls: { type: integer }
+        budget_exhausted: { type: boolean }
+
+    Session:
+      type: object
+      properties:
+        session_id: { type: string }
+        token: { type: string, description: JWT }
+        delegator: { type: string }
+        agent: { type: string }
+        scope:
+          type: array
+          items: { type: string }
+        budget: { $ref: '#/components/schemas/BudgetStatus' }
+        max_chain_depth: { type: integer }
+        status: { type: string, enum: [active, expired, revoked] }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        metadata: { type: object }
+
+    AuditRecord:
+      type: object
+      properties:
+        id: { type: string }
+        timestamp: { type: string, format: date-time }
+        session_id: { type: string }
+        principal: { type: string }
+        action: { type: string }
+        resource: { $ref: '#/components/schemas/EntityRef' }
+        decision: { type: string, enum: [ALLOW, DENY] }
+        reason: { type: string }
+        policies_evaluated: { type: integer }
+        evaluation_time_us: { type: integer }
+        context_snapshot: { type: object }
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        details: { type: object }
+
+paths:
+  /v1/authorize:
+    post:
+      operationId: authorize
+      summary: Evaluate an authorization request
+      tags: [Authorization]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_token, action, resource]
+              properties:
+                session_token: { type: string }
+                action: { type: string, example: 'AgentIAM::Action::"read"' }
+                resource: { $ref: '#/components/schemas/EntityRef' }
+                context: { type: object }
+      responses:
+        '200':
+          description: Authorization decision
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  request_id: { type: string }
+                  data: { $ref: '#/components/schemas/Decision' }
+
+  /v1/authorize/batch:
+    post:
+      operationId: authorizeBatch
+      summary: Evaluate multiple authorization requests
+      tags: [Authorization]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_token, requests]
+              properties:
+                session_token: { type: string }
+                requests:
+                  type: array
+                  items:
+                    type: object
+                    required: [action, resource]
+                    properties:
+                      action: { type: string }
+                      resource: { $ref: '#/components/schemas/EntityRef' }
+                      context: { type: object }
+      responses:
+        '200':
+          description: Batch authorization decisions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  request_id: { type: string }
+                  data:
+                    type: object
+                    properties:
+                      results:
+                        type: array
+                        items: { $ref: '#/components/schemas/Decision' }
+
+  /v1/sessions:
+    post:
+      operationId: createSession
+      summary: Create a delegation session
+      tags: [Sessions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [delegator, agent, scope]
+              properties:
+                delegator: { $ref: '#/components/schemas/EntityRef' }
+                agent: { $ref: '#/components/schemas/EntityRef' }
+                scope:
+                  type: array
+                  items: { type: string }
+                ttl_seconds: { type: integer, default: 3600 }
+                budget:
+                  type: object
+                  properties:
+                    max_tokens: { type: integer, default: -1 }
+                    max_cost_cents: { type: integer, default: -1 }
+                    max_calls: { type: integer, default: -1 }
+                max_chain_depth: { type: integer, default: 10 }
+                metadata: { type: object }
+      responses:
+        '201':
+          description: Session created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  request_id: { type: string }
+                  data: { $ref: '#/components/schemas/Session' }
+
+    get:
+      operationId: listSessions
+      summary: List sessions
+      tags: [Sessions]
+      parameters:
+        - name: agent
+          in: query
+          schema: { type: string }
+        - name: delegator
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { type: string, enum: [active, expired, revoked], default: active }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Session list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  request_id: { type: string }
+                  data:
+                    type: object
+                    properties:
+                      sessions:
+                        type: array
+                        items: { $ref: '#/components/schemas/Session' }
+                      next_cursor: { type: string }
+                      total: { type: integer }
+
+  /v1/sessions/{session_id}:
+    get:
+      operationId: getSession
+      summary: Get session details
+      tags: [Sessions]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Session details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  request_id: { type: string }
+                  data: { $ref: '#/components/schemas/Session' }
+
+    delete:
+      operationId: revokeSession
+      summary: Revoke a session
+      tags: [Sessions]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Session revoked
+
+  /v1/sessions/{session_id}/budget:
+    post:
+      operationId: reportUsage
+      summary: Report budget consumption
+      tags: [Sessions]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tokens_used: { type: integer, default: 0 }
+                cost_cents: { type: integer, default: 0 }
+                calls_used: { type: integer, default: 0 }
+      responses:
+        '200':
+          description: Updated budget status
+
+  /v1/entities:
+    post:
+      operationId: upsertEntities
+      summary: Register or update entities
+      tags: [Entities]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [entities]
+              properties:
+                entities:
+                  type: array
+                  items: { $ref: '#/components/schemas/EntityRef' }
+      responses:
+        '200':
+          description: Entities upserted
+
+    get:
+      operationId: listEntities
+      summary: List entities
+      tags: [Entities]
+      parameters:
+        - name: type
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Entity list
+
+  /v1/entities/{type}/{id}:
+    get:
+      operationId: getEntity
+      summary: Get entity details
+      tags: [Entities]
+      parameters:
+        - name: type
+          in: path
+          required: true
+          schema: { type: string }
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Entity details
+
+    delete:
+      operationId: deleteEntity
+      summary: Delete an entity
+      tags: [Entities]
+      parameters:
+        - name: type
+          in: path
+          required: true
+          schema: { type: string }
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Entity deleted
+
+  /v1/policies:
+    get:
+      operationId: listPolicies
+      summary: List loaded policies
+      tags: [Policies]
+      responses:
+        '200':
+          description: Policy list
+
+  /v1/policies/validate:
+    post:
+      operationId: validatePolicy
+      summary: Validate policy text without loading
+      tags: [Policies]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [policy_text]
+              properties:
+                policy_text: { type: string }
+                validate_against_schema: { type: boolean, default: true }
+      responses:
+        '200':
+          description: Validation result
+
+  /v1/policies/reload:
+    post:
+      operationId: reloadPolicies
+      summary: Hot-reload policies from disk
+      tags: [Policies]
+      responses:
+        '200':
+          description: Policies reloaded
+
+  /v1/audit/decisions:
+    get:
+      operationId: queryAuditDecisions
+      summary: Query authorization decision logs
+      tags: [Audit]
+      parameters:
+        - name: agent
+          in: query
+          schema: { type: string }
+        - name: action
+          in: query
+          schema: { type: string }
+        - name: decision
+          in: query
+          schema: { type: string, enum: [ALLOW, DENY] }
+        - name: session_id
+          in: query
+          schema: { type: string }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 500 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Audit records
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  request_id: { type: string }
+                  data:
+                    type: object
+                    properties:
+                      records:
+                        type: array
+                        items: { $ref: '#/components/schemas/AuditRecord' }
+                      next_cursor: { type: string }
+                      total: { type: integer }
+
+  /v1/audit/stats:
+    get:
+      operationId: getAuditStats
+      summary: Get audit statistics summary
+      tags: [Audit]
+      parameters:
+        - name: agent
+          in: query
+          schema: { type: string }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: Audit statistics
+
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Health check (no auth required)
+      tags: [Operational]
+      security: []
+      responses:
+        '200':
+          description: Service health status
+
+  /v1/config:
+    get:
+      operationId: getConfig
+      summary: Get service configuration (sanitized)
+      tags: [Operational]
+      responses:
+        '200':
+          description: Service configuration
