@@ -1,254 +1,336 @@
-# Phase 1 MVP — Implementation Tasks (Updated)
+# Phase 1 MVP — Implementation Tasks
 
-> 基于：Cedar Schema v0.2.0 + API Design v0.2.0 + Token Service Design v0.2.0
+> 技术栈：Rust + axum + cedar-policy + sqlx/sqlite + jsonwebtoken
 > 目标：**能用 Python SDK 对 1 个 Agent 做权限控制**
 
 ## Week 1: 项目骨架 + Cedar 引擎集成
 
 ### 1.1 项目初始化
-- [ ] 初始化 Go module（`go mod init github.com/chaosreload/agentiam`）
+- [ ] 初始化 Rust 项目（`cargo init --name agentiam`）
+- [ ] 设置 workspace（如需拆 crate）：
+  ```
+  Cargo.toml (workspace)
+  crates/
+    agentiam-server/      # HTTP server 入口
+    agentiam-core/        # Cedar 引擎 + 授权逻辑
+    agentiam-sdk-python/  # Python binding (PyO3, Phase 1 可选)
+  ```
+  或者 Phase 1 先用单 crate，后续再拆。
+- [ ] 添加核心依赖（Cargo.toml）：
+  ```toml
+  [dependencies]
+  cedar-policy = "4.10"
+  axum = "0.8"
+  tokio = { version = "1", features = ["full"] }
+  serde = { version = "1", features = ["derive"] }
+  serde_json = "1"
+  jsonwebtoken = "9"
+  sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+  uuid = { version = "1", features = ["v4"] }
+  tracing = "0.1"
+  tracing-subscriber = "0.3"
+  config = "0.14"
+  thiserror = "2"
+  anyhow = "1"
+  chrono = { version = "0.4", features = ["serde"] }
+  tower-http = { version = "0.6", features = ["cors", "trace"] }
+  ```
 - [ ] 创建目录结构：
   ```
-  cmd/agentiam-server/main.go
-  internal/cedar/          # Cedar 引擎
-  internal/auth/           # 授权服务
-  internal/session/         # 会话管理
-  internal/token/           # Token 验证
-  internal/audit/           # 审计日志
-  internal/api/             # REST API
-  internal/config/          # 配置加载
-  sdk/python/               # Python SDK
-  configs/                  # 配置文件
+  src/
+    main.rs               # 入口
+    config.rs             # 配置加载
+    cedar/
+      engine.rs           # Cedar 引擎封装
+      entities.rs         # Entity Store
+      mod.rs
+    auth/
+      service.rs          # 授权服务（核心）
+      context.rs          # Cedar Context 构造
+      mod.rs
+    session/
+      manager.rs          # 会话管理
+      jwt.rs              # JWT 签发/验证
+      mod.rs
+    token/
+      apikey.rs           # API Key 认证
+      oauth.rs            # OAuth 2.0 Client Credentials
+      middleware.rs        # 认证中间件
+      mod.rs
+    audit/
+      logger.rs           # 审计日志写入
+      query.rs            # 审计查询
+      mod.rs
+    api/
+      router.rs           # 路由定义
+      handlers/
+        authorize.rs      # POST /v1/authorize
+        sessions.rs       # Session CRUD
+        entities.rs       # Entity CRUD
+        policies.rs       # Policy 操作
+        audit.rs          # 审计查询
+        auth.rs           # API Key + OAuth
+        health.rs         # 健康检查
+      middleware.rs        # 中间件
+      error.rs            # 统一错误处理
+      mod.rs
+    models.rs             # 共享数据模型
+    error.rs              # 全局错误类型
   ```
-- [ ] 创建 Makefile：`build`, `test`, `run`, `lint`, `docker`
-- [ ] 创建 `.gitignore`、`.golangci.yml`
+- [ ] 创建 Makefile / justfile：`build`, `test`, `run`, `lint`, `docker`
+- [ ] 配置 `clippy` + `rustfmt`
 
-### 1.2 Cedar 引擎集成
-- [ ] 调研 Cedar-Go 集成方案（3 选 1）：
-  - A) cedar-policy crate via CGo FFI
-  - B) cedar-wasm via wazero runtime
-  - C) cedar-policy-cli 子进程
-  - 决策标准：如果 A 超过 3 天未搞定 → 切换到 B
-- [ ] 实现 `internal/cedar/engine.go`：
-  - `NewEngine(schemaPath, policiesDir) → Engine`
-  - `Engine.IsAuthorized(principal, action, resource, context) → Decision`
-  - `Engine.Reload() → error`（热重载策略）
-  - `Engine.ValidatePolicy(text) → ValidationResult`
-  - `Engine.ListPolicies() → []PolicyInfo`
-- [ ] 加载 `schemas/agentiam.cedarschema`（AgentIAM namespace）
-- [ ] 加载 `policies/*.cedar`（guardrails + examples）
-- [ ] 实现 Entity Store：
-  - `EntityStore.Load(jsonPath)` — 从 JSON 文件加载
-  - `EntityStore.Upsert(entities)` — 运行时添加/更新
-  - `EntityStore.Get(type, id)` — 查询单个实体
-  - `EntityStore.Delete(type, id)` — 删除
+### 1.2 Cedar 引擎集成（原生！）
+- [ ] 实现 `src/cedar/engine.rs`：
+  ```rust
+  pub struct CedarEngine {
+      policy_set: PolicySet,
+      schema: Schema,
+      entities: Entities,
+      authorizer: Authorizer,
+  }
+
+  impl CedarEngine {
+      pub fn new(schema_path: &Path, policies_dir: &Path) -> Result<Self>;
+      pub fn is_authorized(&self, request: &Request, entities: &Entities) -> Response;
+      pub fn reload(&mut self, policies_dir: &Path) -> Result<()>;
+      pub fn validate_policy(&self, policy_text: &str) -> ValidationResult;
+      pub fn list_policies(&self) -> Vec<PolicyInfo>;
+  }
+  ```
+- [ ] 加载 `schemas/agentiam.cedarschema`（直接用 `Schema::from_cedarschema_str`）
+- [ ] 加载 `policies/*.cedar`（遍历目录，`PolicySet::from_str`）
+- [ ] 实现 Entity Store（`src/cedar/entities.rs`）：
+  - `EntityStore::load_from_json(path)` — 从 JSON 加载
+  - `EntityStore::upsert(entities)` — 运行时添加/更新
+  - `EntityStore::get(entity_uid)` — 查询
+  - `EntityStore::delete(entity_uid)` — 删除
+  - 内部存储为 `cedar_policy::Entities`，修改时重建
 
 ### 1.3 Cedar 引擎测试
-- [ ] 测试用例（全部使用 `AgentIAM::` namespace）：
+- [ ] 测试用例（`#[cfg(test)]` 模块）：
   - permit 评估：Agent read public resource → ALLOW
-  - forbid 覆盖 permit：banned Agent → DENY（即使有 permit）
+  - forbid 覆盖 permit：banned Agent → DENY
   - 默认 deny：无匹配策略 → DENY
-  - Schema 验证：错误策略拒绝加载
+  - Schema 验证：错误策略被 Validator 拒绝
   - 实体层级：Agent in AgentGroup → 策略继承
-  - Context 条件：chain_depth > max → DENY
+  - Context 条件：chain_depth > max_chain_depth → DENY
   - Budget 条件：remaining_tokens == 0 → DENY
-- [ ] 性能基准：1000 条策略下 P99 < 5ms
+  - 多策略交叉：guardrail forbid + rbac permit → DENY
+- [ ] 性能基准（`#[bench]` 或 criterion）：
+  - 1000 条策略下单次评估 P99 < 1ms（Rust 原生应该远低于此）
 
 ## Week 2: Token 验证 + 会话管理
 
 ### 2.1 JWT 工具
-- [ ] 实现 `internal/token/jwt.go`：
-  - `SignAccessToken(claims) → string`（Phase 1: HS256）
-  - `SignSessionToken(session) → string`
-  - `VerifyToken(tokenString) → Claims`（验证签名 + 过期 + 类型）
-  - `ParseUnverified(tokenString) → Header`（解析 header 确定 typ）
-- [ ] JWT Claims 结构体：
-  ```go
-  type AccessTokenClaims struct {
-      jwt.RegisteredClaims
-      Scope   string         `json:"scope"`
-      AgentIAM AgentIAMClaims `json:"agentiam"`
+- [ ] 实现 `src/session/jwt.rs`：
+  ```rust
+  pub fn sign_access_token(claims: &AccessTokenClaims, secret: &[u8]) -> Result<String>;
+  pub fn sign_session_token(claims: &SessionTokenClaims, secret: &[u8]) -> Result<String>;
+  pub fn verify_token<T: DeserializeOwned>(token: &str, secret: &[u8]) -> Result<TokenData<T>>;
+  ```
+- [ ] Claims 结构体（`src/models.rs`）：
+  ```rust
+  #[derive(Serialize, Deserialize)]
+  pub struct AccessTokenClaims {
+      pub iss: String,
+      pub sub: String,           // client_id or user_id
+      pub aud: String,
+      pub exp: i64,
+      pub iat: i64,
+      pub jti: String,
+      pub scope: String,
+      pub agentiam: AgentIAMClaims,
   }
-  type SessionTokenClaims struct {
-      jwt.RegisteredClaims
-      Delegator       string   `json:"delegator"`        // Cedar entity UID
-      DelegationChain []string `json:"delegation_chain"`
-      Scope           []string `json:"scope"`            // Cedar action UIDs
-      Budget          Budget   `json:"budget"`
-      MaxChainDepth   int      `json:"max_chain_depth"`
-      Metadata        map[string]string `json:"metadata,omitempty"`
+
+  #[derive(Serialize, Deserialize)]
+  pub struct SessionTokenClaims {
+      pub iss: String,
+      pub sub: String,           // Cedar entity UID
+      pub aud: String,
+      pub exp: i64,
+      pub iat: i64,
+      pub jti: String,           // = session_id
+      pub delegator: String,     // Cedar entity UID
+      pub delegation_chain: Vec<String>,
+      pub scope: Vec<String>,    // Cedar action UIDs
+      pub budget: Budget,
+      pub max_chain_depth: i32,
+      pub metadata: Option<HashMap<String, String>>,
   }
   ```
-- [ ] 测试：签发 → 验证 → 过期 → 篡改检测
+- [ ] 测试：签发 → 验证 → 过期拒绝 → 篡改检测
 
 ### 2.2 API Key 认证
-- [ ] 实现 `internal/token/apikey.go`：
-  - `CreateAPIKey(env) → (key, hash)`
-  - `VerifyAPIKey(key) → bool`
-  - API Key 格式：`ak_{env}_{random32}`
-  - 存储：SQLite（hash + 创建时间 + 名称）
-- [ ] API Key 管理端点：
-  - `POST /v1/api-keys` → 创建
-  - `GET /v1/api-keys` → 列出（只显示前缀+后4位）
-  - `DELETE /v1/api-keys/{id}` → 吊销
+- [ ] 实现 `src/token/apikey.rs`：
+  - `create_api_key(env: &str) → (key_string, key_hash)`
+  - `verify_api_key(key: &str, store: &db) → Result<ApiKeyInfo>`
+  - 格式：`ak_{env}_{random32}`，存储 SHA-256 hash
+- [ ] SQLite 表：`api_keys (id, name, key_hash, env, created_at, revoked)`
+- [ ] 端点：POST / GET / DELETE `/v1/api-keys`
 
 ### 2.3 OAuth 2.0 Client Credentials
-- [ ] 实现 `internal/token/oauth.go`：
-  - `RegisterClient(name, grantTypes, scopes, agentId) → Client`
-  - `AuthenticateClient(clientId, clientSecret) → Client`
-  - `IssueAccessToken(client, requestedScopes) → AccessToken`
-- [ ] `POST /v1/oauth/token` 端点：
-  - grant_type=client_credentials
-  - 验证 client_id + client_secret
-  - 签发 Access Token（JWT, HS256）
-- [ ] 10 个 OAuth scope 定义（agentiam:authorize, agentiam:session:* 等）
+- [ ] 实现 `src/token/oauth.rs`：
+  - `register_client(req) → OAuthClient`
+  - `authenticate_client(client_id, client_secret) → OAuthClient`
+  - `issue_access_token(client, scopes) → AccessToken`
+- [ ] `POST /v1/oauth/token`（grant_type=client_credentials）
+- [ ] 10 个 OAuth scope 定义 + scope 验证
 
 ### 2.4 会话管理
-- [ ] 实现 `internal/session/manager.go`：
-  - `CreateSession(req) → Session`
-    - 验证 delegator 和 agent 实体存在
-    - 初始化 budget（remaining = max）
-    - 签发 Session Token (JWT)
-    - 存储到内存 map + SQLite
-  - `GetSession(sessionId) → Session`
-  - `ListSessions(filters) → []Session`
-  - `RevokeSession(sessionId)`
-  - `UpdateBudget(sessionId, usage) → BudgetStatus`
-  - `ValidateSessionToken(token) → Session`
-    - 验证 JWT 签名 + 过期
-    - 检查吊销列表
-    - 从存储加载最新 budget
-- [ ] 吊销列表（内存 map，TTL 自动清理）
-- [ ] Scope 预检查：请求 action 是否在 session scope 中
+- [ ] 实现 `src/session/manager.rs`：
+  ```rust
+  pub struct SessionManager {
+      sessions: DashMap<String, Session>,  // 内存缓存
+      db: SqlitePool,                      // 持久化
+      jwt_secret: Vec<u8>,
+  }
+
+  impl SessionManager {
+      pub async fn create_session(&self, req: CreateSessionRequest) -> Result<Session>;
+      pub async fn get_session(&self, session_id: &str) -> Result<Session>;
+      pub async fn list_sessions(&self, filters: SessionFilter) -> Result<Vec<Session>>;
+      pub async fn revoke_session(&self, session_id: &str) -> Result<()>;
+      pub async fn update_budget(&self, session_id: &str, usage: BudgetUsage) -> Result<BudgetStatus>;
+      pub fn validate_token(&self, token: &str) -> Result<SessionTokenClaims>;
+  }
+  ```
+- [ ] 吊销列表（`DashMap<String, Instant>`，定期清理过期条目）
+- [ ] Scope 预检查逻辑
+- [ ] SQLite 表：`sessions (session_id, delegator, agent, scope, budget, ..., revoked)`
 
 ### 2.5 测试
-- [ ] Session 生命周期：create → use → expire → deny
-- [ ] Scope 违规：请求不在 scope 中 → DENY（不走 Cedar）
-- [ ] 吊销：revoke → 后续请求 DENY
+- [ ] Session 生命周期测试
+- [ ] Scope 违规 → DENY
+- [ ] 吊销 → DENY
 - [ ] Budget 消耗 + 耗尽 → DENY
 
 ## Week 3: 授权服务 + REST API
 
 ### 3.1 授权服务
-- [ ] 实现 `internal/auth/service.go`：
-  - `Authorize(req AuthorizeRequest) → AuthorizeResponse`
-  - 完整流程：
-    1. 验证 session token（JWT 签名 + 过期 + 吊销）
-    2. 检查 scope（action 在 session scope 中？）
-    3. 从 session 构造 Cedar Context（合并 session 数据 + 请求 context）
-    4. 构造 Cedar Request（principal, action, resource）
-    5. 调用 Cedar Engine.IsAuthorized()
-    6. 写审计日志（异步）
-    7. 返回 Decision + diagnostics
-  - `AuthorizeBatch(req) → BatchResponse`
+- [ ] 实现 `src/auth/service.rs`：
+  ```rust
+  pub struct AuthorizationService {
+      cedar: Arc<RwLock<CedarEngine>>,
+      sessions: Arc<SessionManager>,
+      audit: Arc<AuditLogger>,
+  }
 
-### 3.2 Context 构造
-- [ ] 实现 `internal/auth/context.go`：
-  - 从 Session 提取：session_id, session_valid, delegator_id, scope, remaining_*, max_chain_depth
-  - 从请求合并：chain_depth, request_ip, user_consent, approval_status
-  - 输出 Cedar Context（匹配 `SessionContext` schema type）
-
-### 3.3 REST API
-- [ ] 实现 `internal/api/router.go`（使用 chi 或 gin）
-- [ ] 中间件：
-  - `AuthMiddleware` — 验证 API Key 或 Access Token
-  - `RequestIDMiddleware` — 生成 request_id
-  - `LoggingMiddleware` — 结构化 JSON 日志
-  - `CORSMiddleware`
-  - `RecoveryMiddleware` — panic 恢复
-  - `ScopeMiddleware` — 检查 OAuth scope（对应端点权限）
-- [ ] 端点实现：
-  - `POST /v1/authorize` — 核心授权检查
-  - `POST /v1/authorize/batch` — 批量授权
-  - `POST /v1/sessions` — 创建委托会话
-  - `GET /v1/sessions` — 列出会话（分页 + cursor）
-  - `GET /v1/sessions/{id}` — 会话详情
-  - `DELETE /v1/sessions/{id}` — 吊销会话
-  - `POST /v1/sessions/{id}/budget` — 上报预算消耗
-  - `POST /v1/entities` — 注册/更新实体（upsert）
-  - `GET /v1/entities` — 列出实体
-  - `GET /v1/entities/{type}/{id}` — 实体详情
-  - `DELETE /v1/entities/{type}/{id}` — 删除实体
-  - `GET /v1/policies` — 列出策略
-  - `POST /v1/policies/validate` — 验证策略文本
-  - `POST /v1/policies/reload` — 热重载策略
-  - `POST /v1/api-keys` / `GET` / `DELETE` — API Key 管理
-  - `POST /v1/oauth/token` — OAuth token 签发
-  - `GET /health` — 健康检查（无认证）
-  - `GET /v1/config` — 服务配置
-
-### 3.4 Server 入口
-- [ ] 实现 `cmd/agentiam-server/main.go`
-- [ ] 配置加载（`configs/agentiam.yaml` + env vars）：
-  ```yaml
-  server:
-    addr: ":8080"
-  cedar:
-    schema: "schemas/agentiam.cedarschema"
-    policies_dir: "policies/"
-    entities_file: "entities.json"   # optional
-  token:
-    jwt_secret: "${AGENTIAM_JWT_SECRET}"
-    access_token_ttl: 3600
-    session_token_ttl_max: 86400
-  audit:
-    backend: "sqlite"
-    sqlite_path: "data/audit.db"
+  impl AuthorizationService {
+      pub async fn authorize(&self, req: AuthorizeRequest) -> Result<AuthorizeResponse>;
+      pub async fn authorize_batch(&self, req: BatchRequest) -> Result<BatchResponse>;
+  }
   ```
-- [ ] Dockerfile（multi-stage build）
+- [ ] `authorize` 完整流程：
+  1. 验证 session token
+  2. 检查 scope
+  3. 构造 Cedar Context（`src/auth/context.rs`）
+  4. 构造 Cedar Request（EntityUid 解析）
+  5. `cedar_engine.is_authorized()`
+  6. 异步写审计日志
+  7. 返回 Decision + diagnostics
+
+### 3.2 REST API（axum）
+- [ ] 实现 `src/api/router.rs`：
+  ```rust
+  pub fn create_router(state: AppState) -> Router {
+      Router::new()
+          // Authorization
+          .route("/v1/authorize", post(authorize))
+          .route("/v1/authorize/batch", post(authorize_batch))
+          // Sessions
+          .route("/v1/sessions", post(create_session).get(list_sessions))
+          .route("/v1/sessions/:id", get(get_session).delete(revoke_session))
+          .route("/v1/sessions/:id/budget", post(report_usage))
+          // Entities
+          .route("/v1/entities", post(upsert_entities).get(list_entities))
+          .route("/v1/entities/:type/:id", get(get_entity).delete(delete_entity))
+          // Policies
+          .route("/v1/policies", get(list_policies))
+          .route("/v1/policies/validate", post(validate_policy))
+          .route("/v1/policies/reload", post(reload_policies))
+          // Auth
+          .route("/v1/api-keys", post(create_api_key).get(list_api_keys))
+          .route("/v1/api-keys/:id", delete(revoke_api_key))
+          .route("/v1/oauth/token", post(oauth_token))
+          // Audit
+          .route("/v1/audit/decisions", get(query_audit))
+          .route("/v1/audit/decisions/:id", get(get_audit_record))
+          .route("/v1/audit/stats", get(audit_stats))
+          // Operational
+          .route("/health", get(health_check))
+          .route("/v1/config", get(get_config))
+          // Middleware
+          .layer(TraceLayer::new_for_http())
+          .layer(CorsLayer::permissive())
+          .with_state(state)
+  }
+  ```
+- [ ] 认证中间件（`src/token/middleware.rs`）：
+  - 从 Authorization header 提取 token
+  - API Key → 验证 hash
+  - Bearer JWT → 验证 Access Token → 提取 scopes
+  - 检查 scope 匹配端点要求
+- [ ] 统一错误处理（`src/api/error.rs`）：
+  ```rust
+  pub struct ApiError {
+      pub code: String,       // "SessionExpired", "AccessDenied", etc.
+      pub message: String,
+      pub details: Option<Value>,
+      pub status: StatusCode,
+  }
+  impl IntoResponse for ApiError { ... }
+  ```
+- [ ] 请求 ID 中间件
+
+### 3.3 配置
+- [ ] 实现 `src/config.rs`：
+  ```rust
+  #[derive(Deserialize)]
+  pub struct AppConfig {
+      pub server: ServerConfig,    // addr
+      pub cedar: CedarConfig,      // schema, policies_dir, entities_file
+      pub token: TokenConfig,      // jwt_secret, ttl
+      pub audit: AuditConfig,      // sqlite_path
+  }
+  ```
+- [ ] 支持 YAML + env var override（`AGENTIAM_JWT_SECRET` 等）
+- [ ] `cmd/agentiam-server` 入口（或 `src/main.rs`）
+
+### 3.4 Dockerfile
+- [ ] Multi-stage build（builder + runtime）
+- [ ] 最终镜像基于 `debian:bookworm-slim`（或 `alpine` + musl）
 
 ## Week 4: 审计日志 + 集成测试
 
 ### 4.1 审计日志
-- [ ] 实现 `internal/audit/logger.go`：
-  - SQLite 表自动创建（auto-migrate）
-  - `Log(record AuditRecord)` — 异步写入（buffered channel）
-  - 表结构：
-    ```sql
-    CREATE TABLE audit_log (
-        id TEXT PRIMARY KEY,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-        session_id TEXT,
-        principal TEXT NOT NULL,
-        action TEXT NOT NULL,
-        resource_type TEXT,
-        resource_id TEXT,
-        resource_attrs TEXT,    -- JSON
-        context TEXT,           -- JSON snapshot
-        decision TEXT NOT NULL, -- ALLOW | DENY
-        reason TEXT,
-        policies_evaluated INTEGER,
-        evaluation_time_us INTEGER
-    );
-    CREATE INDEX idx_audit_principal ON audit_log(principal, timestamp);
-    CREATE INDEX idx_audit_decision ON audit_log(decision, timestamp);
-    CREATE INDEX idx_audit_session ON audit_log(session_id);
-    ```
-- [ ] 实现 `internal/audit/query.go`：
-  - 按 agent/action/decision/session_id/time 过滤
-  - cursor 分页
-  - 统计聚合（total/allow/deny/deny_by_reason/avg_latency/p99_latency）
-- [ ] 端点：
-  - `GET /v1/audit/decisions` — 查询
-  - `GET /v1/audit/decisions/{id}` — 详情
-  - `GET /v1/audit/stats` — 统计
+- [ ] 实现 `src/audit/logger.rs`：
+  - SQLite 表自动创建（sqlx migrate）
+  - `AuditLogger::log(record)` — 通过 `tokio::mpsc` channel 异步写入
+  - 批量写入（每 100 条或 1 秒 flush 一次）
+- [ ] 实现 `src/audit/query.rs`：
+  - 按 principal/action/decision/session_id/time 过滤
+  - cursor 分页（基于 id）
+  - 统计聚合 SQL
+- [ ] 端点：GET /v1/audit/decisions, /v1/audit/decisions/{id}, /v1/audit/stats
 
 ### 4.2 集成测试
-- [ ] 完整 HTTP 集成测试（Go httptest）：
-  - 启动 server → 加载策略 → 创建 API Key
-  - 创建 OAuth Client → 获取 Access Token
+- [ ] `tests/integration_test.rs`（使用 `axum::test` 或 `reqwest`）：
+  - 启动 server（in-memory SQLite）→ 加载策略
+  - 创建 API Key → 认证
+  - 创建 OAuth Client → 获取 Access Token → 认证
   - 注册实体（User + Agent + Resource）
-  - 创建 Session（委托 User → Agent）
-  - authorize: 匹配 permit → ALLOW
-  - authorize: 匹配 guardrail forbid → DENY
-  - authorize: scope 外 action → DENY (scope_violation)
+  - 创建 Session → 获取 Session Token
+  - authorize: permit → ALLOW
+  - authorize: guardrail forbid → DENY
+  - authorize: scope 外 → DENY (scope_violation)
   - authorize: 过期 session → DENY
   - authorize: 吊销 session → DENY
-  - authorize batch: 3 个请求混合 → [ALLOW, ALLOW, DENY]
+  - authorize batch: [ALLOW, ALLOW, DENY]
   - budget: 上报消耗 → 耗尽 → DENY
-  - audit: 查询上述所有决策记录
-  - audit stats: 验证统计数据正确
-- [ ] 性能测试：100 并发 authorize 请求
+  - audit: 查询所有决策 → 验证记录正确
+  - audit stats: 验证统计
+- [ ] 性能基准：100 并发 authorize 请求（criterion 或自定义 benchmark）
 
 ## Week 5: Python SDK
 
@@ -257,15 +339,15 @@
   ```
   sdk/python/
   ├── agentiam/
-  │   ├── __init__.py         # 导出 AgentIAM, Decision, Session
-  │   ├── client.py           # AgentIAM 主类
-  │   ├── models.py           # Decision, Session, BudgetStatus, AuditRecord
-  │   ├── auth.py             # 认证（API Key / OAuth）
-  │   ├── sessions.py         # SessionManager
-  │   ├── entities.py         # EntityManager
-  │   ├── policies.py         # PolicyManager
-  │   ├── audit.py            # AuditClient
-  │   └── exceptions.py       # AgentIAMError, AuthError, DeniedError
+  │   ├── __init__.py
+  │   ├── client.py          # AgentIAM 主类
+  │   ├── models.py          # Decision, Session, BudgetStatus, AuditRecord
+  │   ├── auth.py            # API Key / OAuth 认证
+  │   ├── sessions.py        # SessionManager
+  │   ├── entities.py        # EntityManager
+  │   ├── policies.py        # PolicyManager
+  │   ├── audit.py           # AuditClient
+  │   └── exceptions.py      # AgentIAMError, AuthError, DeniedError
   ├── pyproject.toml
   ├── tests/
   │   ├── test_client.py
@@ -273,53 +355,32 @@
   │   └── conftest.py
   └── README.md
   ```
-- [ ] `AgentIAM` 主类：
-  - `__init__(endpoint, api_key=None, client_id=None, client_secret=None)`
-  - `authorize(session, action, resource, context=None) → Decision`
-  - `is_allowed(session, action, resource_id=None, **kwargs) → bool`
-  - `authorize_batch(session, requests) → list[Decision]`
-  - `create_session(...) → Session`
-  - `report_usage(session_id, tokens_used, cost_cents, calls_used)`
-  - `health() → HealthStatus`
-  - `.sessions` — SessionManager (list, get, revoke)
-  - `.entities` — EntityManager (upsert, list, get, delete)
-  - `.policies` — PolicyManager (list, validate, reload)
-  - `.audit` — AuditClient (query, stats)
-- [ ] HTTP 客户端：httpx（同步 + 异步）
+- [ ] HTTP 客户端：httpx（同步 + 异步支持）
 - [ ] 自动重试 + 指数退避（429/5xx）
-- [ ] pyproject.toml 配置（pip install agentiam）
+- [ ] `AgentIAM` 主类完整 API（同 api.md 中的 SDK 设计）
+- [ ] pyproject.toml（pip install agentiam）
 
 ### 5.2 SDK 测试
-- [ ] Unit tests（httpx mock）
-- [ ] Integration test（需要运行的 server）：
-  - 完整流程：create session → authorize → report usage → query audit
+- [ ] Unit tests（httpx mock / respx）
+- [ ] Integration test：启动 Rust server → SDK 端到端测试
 
 ## Week 6: Demo + 文档 + 发布
 
 ### 6.1 Demo
-- [ ] `demo/demo.py` — Python SDK 演示脚本：
-  ```python
-  # 1. 连接 AgentIAM
-  # 2. 注册实体（User weichao, Agent research-scout, Resources）
-  # 3. 创建委托会话
-  # 4. 执行 5 个授权检查（3 ALLOW + 2 DENY）
-  # 5. 上报预算消耗
-  # 6. 查询审计日志
-  # 7. 打印总结
-  ```
-- [ ] `demo/run_demo.sh` — 一键启动 server + 运行 demo
-- [ ] `demo/docker-compose.yaml` — Docker 方式运行
+- [ ] `demo/demo.py`：完整演示脚本
+- [ ] `demo/run_demo.sh`：一键启动 server + 运行 demo
+- [ ] `demo/docker-compose.yaml`
 
 ### 6.2 文档
 - [ ] `docs/quickstart.md` — 5 分钟快速开始
-- [ ] `docs/api.md` — 更新（确保和实现一致）
+- [ ] `docs/api.md` — 确保和实现一致
 - [ ] `docs/configuration.md` — 配置参考
 - [ ] `docs/policies-guide.md` — 策略编写指南
 - [ ] README.md — 更新安装说明、badges
 
 ### 6.3 发布
-- [ ] CI/CD：GitHub Actions（build + test + lint）
-- [ ] 性能报告：authorize P50/P95/P99、100 并发 session
+- [ ] GitHub Actions CI：`cargo build`, `cargo test`, `cargo clippy`, `cargo fmt --check`
+- [ ] 性能报告
 - [ ] Tag v0.1.0 release
-- [ ] Python SDK 发布到 PyPI（agentiam）
-- [ ] Docker image 发布到 GHCR
+- [ ] Python SDK → PyPI
+- [ ] Docker image → GHCR

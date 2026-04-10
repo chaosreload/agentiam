@@ -355,11 +355,11 @@ MCP Server 启动时向 AgentIAM 注册自己的能力：
 
 | 组件 | 选型 | 理由 |
 |------|------|------|
-| 策略引擎 | Cedar | AWS 开源，RBAC+ABAC，Rust 性能好，形式化验证 |
+| 策略引擎 | Cedar（原生 Rust crate） | 直接依赖，零 FFI 开销，API 原生调用 |
 | 身份管理 | Keycloak / Casdoor | 成熟的 SSO/OIDC/MFA |
 | 策略分发 | OPAL | 实时推送策略+数据变更到分布式 PDP |
-| 存储 | PostgreSQL | 策略、角色映射、审计日志 |
-| 开发语言 | Go 或 Rust | 生态 + 性能 |
+| 存储 | SQLite (MVP) → PostgreSQL | 策略、角色映射、审计日志 |
+| 开发语言 | Rust (axum + tokio) | Cedar 原生语言，零集成成本，性能极致 |
 
 ## 十、竞品风险评估
 

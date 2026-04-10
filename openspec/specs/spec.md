@@ -323,9 +323,9 @@ The system MUST provide a transparent proxy for MCP protocol tool invocations.
 
 ## Technical Constraints
 
-- Policy engine: Cedar (Rust) — embedded via FFI, WASM, or subprocess
-- Primary language: Go (with Rust FFI for Cedar)
-- Storage: SQLite (MVP) → PostgreSQL (production)
+- Policy engine: Cedar (Rust) — native crate dependency (`cedar-policy = "4.10"`)
+- Primary language: Rust (axum + tokio)
+- Storage: SQLite via sqlx (MVP) → PostgreSQL (production)
 - Session state: In-memory + SQLite (MVP) → Redis (production)
 - API: REST JSON (Phase 1), gRPC (Phase 2+)
 - Auth: API Key + OAuth 2.0 Client Credentials (Phase 1), Auth Code + OIDC (Phase 2)

@@ -4,7 +4,7 @@
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│                  AgentIAM Server (Go)                  │
+│                 AgentIAM Server (Rust)                  │
 │                                                        │
 │  ┌────────────┐  ┌──────────────┐  ┌──────────────┐  │
 │  │  REST API   │  │   Session    │  │    Audit     │  │
@@ -23,10 +23,10 @@
 │                       │                                │
 │                       ▼                                │
 │  ┌────────────────────────────────────────────────┐   │
-│  │          Cedar Engine (Rust via FFI/WASM)       │   │
-│  │  - PolicySet (loaded from .cedar files)         │   │
-│  │  - Entity Store (loaded from JSON)              │   │
-│  │  - Schema Validation                            │   │
+│  │          Cedar Engine (native Rust crate)        │   │
+│  │  - cedar-policy = "4.10" (direct dependency)    │   │
+│  │  - PolicySet, Authorizer, Entities — native API │   │
+│  │  - Schema Validation via Validator              │   │
 │  └────────────────────────────────────────────────┘   │
 └──────────────────────────────────────────────────────┘
 
@@ -41,64 +41,93 @@
 
 | Component | Choice | Rationale |
 |-----------|--------|-----------|
-| **Server** | Go (with Rust FFI for Cedar) | Go for HTTP ergonomics + ecosystem; Rust for Cedar native performance |
-| **Cedar integration** | cedar-policy crate via C FFI (cgo) | Direct Rust integration; alternatively cedar-wasm if FFI is too complex |
-| **Session tokens** | JWT (HS256 for MVP) | Industry standard, stateless validation, easy to inspect |
-| **Session store** | In-memory map + SQLite backup | Simple for MVP, Redis in Phase 2 |
-| **Audit store** | SQLite | Zero-dependency, good enough for 1M+ records |
-| **Python SDK** | httpx-based thin client | Minimal dependencies, async-ready |
-| **Config** | YAML + env vars | Standard for Go services |
+| **Language** | Rust | Cedar is Rust-native; zero FFI overhead, direct API access |
+| **HTTP Server** | axum (tokio) | Async, ergonomic, tokio ecosystem |
+| **Cedar** | `cedar-policy` crate (native) | Direct dependency, no FFI/WASM bridge needed |
+| **Session tokens** | JWT (HS256 for MVP) | Industry standard, `jsonwebtoken` crate |
+| **Session store** | DashMap (in-memory) + SQLite | Lock-free concurrent map + persistence |
+| **Audit store** | SQLite via sqlx | Async, compile-time query checking |
+| **Python SDK** | httpx-based thin client | Minimal deps, async-ready |
+| **Config** | YAML + env vars | `config` + `serde` crates |
+| **Logging** | tracing + tracing-subscriber | Structured, async-aware |
+| **Error handling** | thiserror + anyhow | Ergonomic error types |
 
-## Alternative: Cedar WASM vs FFI
+## Key Rust Crates
 
-If Rust FFI via cgo proves complex, fallback to:
-1. **Cedar WASM**: Compile cedar-policy to WASM, call from Go via wazero runtime
-2. **Cedar subprocess**: Run cedar-policy-cli as subprocess (highest latency, simplest integration)
-
-Decision criteria: If FFI prototype takes > 3 days in Week 1, switch to WASM.
+```toml
+[dependencies]
+cedar-policy = "4.10"       # Policy engine (NATIVE!)
+axum = "0.8"                # HTTP framework
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+jsonwebtoken = "9"          # JWT signing/verification
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+dashmap = "6"               # Concurrent HashMap
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+config = "0.14"
+thiserror = "2"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+sha2 = "0.10"               # API Key hashing
+rand = "0.8"                # Random key generation
+```
 
 ## Directory Structure
 
 ```
 agentiam/
-├── cmd/
-│   └── agentiam-server/        # Server entry point
-│       └── main.go
-├── internal/
-│   ├── auth/                   # Authorization service
-│   │   ├── service.go          # Core auth logic
-│   │   └── service_test.go
-│   ├── cedar/                  # Cedar engine wrapper
-│   │   ├── engine.go           # Cedar FFI/WASM bridge
-│   │   ├── engine_test.go
-│   │   └── bridge/             # Rust FFI code (if using cgo)
-│   ├── session/                # Session management
-│   │   ├── manager.go          # Create/validate/list sessions
-│   │   ├── jwt.go              # JWT issuance and validation
-│   │   └── manager_test.go
-│   ├── audit/                  # Audit logging
-│   │   ├── logger.go           # SQLite audit writer
-│   │   ├── query.go            # Audit query logic
-│   │   └── logger_test.go
-│   └── api/                    # REST API handlers
-│       ├── handler.go          # HTTP handlers
-│       ├── middleware.go        # Auth, logging, CORS
-│       └── router.go           # Route definitions
+├── Cargo.toml
+├── src/
+│   ├── main.rs                 # Server entry point
+│   ├── config.rs               # Configuration loading
+│   ├── models.rs               # Shared data models
+│   ├── error.rs                # Global error types
+│   ├── cedar/
+│   │   ├── mod.rs
+│   │   ├── engine.rs           # Cedar engine wrapper (native API)
+│   │   └── entities.rs         # Entity store management
+│   ├── auth/
+│   │   ├── mod.rs
+│   │   ├── service.rs          # Core authorization logic
+│   │   └── context.rs          # Cedar Context construction
+│   ├── session/
+│   │   ├── mod.rs
+│   │   ├── manager.rs          # Session CRUD + budget
+│   │   └── jwt.rs              # JWT issue/verify
+│   ├── token/
+│   │   ├── mod.rs
+│   │   ├── apikey.rs           # API Key auth
+│   │   ├── oauth.rs            # OAuth 2.0 CC
+│   │   └── middleware.rs       # Auth middleware (axum)
+│   ├── audit/
+│   │   ├── mod.rs
+│   │   ├── logger.rs           # Async SQLite writer
+│   │   └── query.rs            # Audit query + stats
+│   └── api/
+│       ├── mod.rs
+│       ├── router.rs           # axum Router definition
+│       ├── error.rs            # API error responses
+│       ├── middleware.rs        # Request ID, logging
+│       └── handlers/
+│           ├── authorize.rs    # POST /v1/authorize
+│           ├── sessions.rs     # Session CRUD
+│           ├── entities.rs     # Entity CRUD
+│           ├── policies.rs     # Policy operations
+│           ├── audit.rs        # Audit queries
+│           ├── auth.rs         # API Key + OAuth endpoints
+│           └── health.rs       # GET /health
 ├── sdk/
-│   └── python/
-│       ├── agentiam/
-│       │   ├── __init__.py
-│       │   ├── client.py       # AgentIAM class
-│       │   ├── models.py       # Decision, Session, AuditRecord
-│       │   └── audit.py        # Audit query client
-│       ├── pyproject.toml
-│       └── tests/
-├── policies/                   # Default policies (already exists)
-├── schemas/                    # Cedar schemas (already exists)
+│   └── python/                 # Python SDK (httpx)
+├── policies/                   # Cedar policies
+├── schemas/                    # Cedar schema
 ├── configs/
 │   └── agentiam.yaml           # Server configuration
-├── go.mod
-├── go.sum
+├── tests/
+│   └── integration_test.rs     # End-to-end tests
 ├── Makefile
 └── Dockerfile
 ```
@@ -247,7 +276,7 @@ Entity Store (loaded at startup):
 8. Ready to serve check() requests
 ```
 
-## Database Schema (SQLite)
+## Database Schema (SQLite via sqlx)
 
 ```sql
 -- Sessions table
@@ -256,9 +285,14 @@ CREATE TABLE sessions (
     delegator TEXT NOT NULL,
     agent TEXT NOT NULL,
     scope TEXT NOT NULL,          -- JSON array
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    expires_at DATETIME NOT NULL,
-    revoked BOOLEAN DEFAULT FALSE
+    budget_max TEXT NOT NULL,     -- JSON {max_tokens, max_cost_cents, max_calls}
+    budget_remaining TEXT NOT NULL, -- JSON {remaining_tokens, ...}
+    max_chain_depth INTEGER NOT NULL DEFAULT 10,
+    metadata TEXT,               -- JSON
+    created_at TEXT NOT NULL,     -- ISO 8601
+    expires_at TEXT NOT NULL,
+    revoked INTEGER DEFAULT 0,
+    revoked_at TEXT
 );
 
 -- Audit log table (append-only)
@@ -286,7 +320,7 @@ CREATE INDEX idx_audit_session ON audit_log(session_id);
 
 | Level | Scope | Tool |
 |-------|-------|------|
-| Unit | Cedar engine wrapper, JWT utils, session CRUD | Go testing |
-| Integration | API endpoints with real Cedar + SQLite | Go httptest |
+| Unit | Cedar engine, JWT utils, session CRUD | `#[cfg(test)]` + `cargo test` |
+| Integration | API endpoints with real Cedar + SQLite | axum::test + reqwest |
 | E2E | Python SDK → REST API → Cedar → audit | pytest |
-| Benchmark | Policy evaluation latency | Go benchmark |
+| Benchmark | Policy evaluation latency | criterion |
