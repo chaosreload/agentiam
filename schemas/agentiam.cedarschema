@@ -1,0 +1,107 @@
+// AgentIAM Cedar Entity Schema
+// Defines the entity types and actions for AI Agent authorization
+
+// ─── Principal Types ───
+
+entity User in [Group, Organization] {
+    email: String,
+    role: String,
+    mfa_enabled: Bool,
+};
+
+entity Group in [Organization] {
+    description: String,
+};
+
+entity Organization {
+    plan: String,  // "free" | "pro" | "enterprise"
+};
+
+entity Agent in [AgentGroup] {
+    delegator: User,
+    framework: String,     // "openclaw" | "langchain" | "crewai"
+    version: String,
+    risk_level: String,    // "low" | "medium" | "high"
+    banned: Bool,
+};
+
+entity AgentGroup {
+    description: String,
+};
+
+// ─── Resource Types ───
+
+entity Service {
+    owner: User,
+    sensitivity: String,  // "public" | "internal" | "secret"
+};
+
+entity Tool in [Service] {
+    risk: String,          // "low" | "medium" | "high" | "critical"
+    reversible: Bool,
+    requires_approval: Bool,
+};
+
+entity Resource in [Service] {
+    owner: User,
+    sensitivity: String,
+    sandbox: Bool,
+    private: Bool,
+};
+
+// ─── Action Definitions ───
+
+// Tool invocation actions
+action "tool:invoke" appliesTo {
+    principal: [Agent],
+    resource: [Tool],
+};
+
+// Read actions
+action "read" appliesTo {
+    principal: [User, Agent],
+    resource: [Resource, Service],
+};
+
+action "list" appliesTo {
+    principal: [User, Agent],
+    resource: [Resource, Service],
+};
+
+// Write actions
+action "write" appliesTo {
+    principal: [User, Agent],
+    resource: [Resource, Service],
+};
+
+action "create" appliesTo {
+    principal: [User, Agent],
+    resource: [Resource, Service],
+};
+
+// Dangerous actions
+action "delete" appliesTo {
+    principal: [User, Agent],
+    resource: [Resource, Service],
+};
+
+action "execute_code" appliesTo {
+    principal: [Agent],
+    resource: [Resource],
+};
+
+action "send_email" appliesTo {
+    principal: [Agent],
+    resource: [Resource],
+};
+
+action "send_money" appliesTo {
+    principal: [Agent],
+    resource: [Resource],
+};
+
+// Delegation actions
+action "delegate" appliesTo {
+    principal: [User],
+    resource: [Agent],
+};
