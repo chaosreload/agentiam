@@ -1,107 +1,274 @@
-// AgentIAM Cedar Entity Schema
-// Defines the entity types and actions for AI Agent authorization
+// ═══════════════════════════════════════════════════════════════════
+// AgentIAM Cedar Schema — v0.2.0
+// The authorization layer for AI Agents
+//
+// Design principles:
+//   1. Session data → Context (per-request, not persistent entity)
+//   2. Delegation → Agent.delegator attribute (entity reference)
+//   3. Actions → grouped for ergonomic policy writing
+//   4. Budget/chain depth → Context (checked per-request)
+// ═══════════════════════════════════════════════════════════════════
 
-// ─── Principal Types ───
+namespace AgentIAM {
 
-entity User in [Group, Organization] {
-    email: String,
-    role: String,
-    mfa_enabled: Bool,
+// ─────────────────────────────────────────────
+// Common Types
+// ─────────────────────────────────────────────
+
+// Session context passed with every authorization request
+type SessionContext = {
+    // Session identity
+    session_id: String,
+    session_valid: Bool,
+
+    // Delegation info
+    delegator_id: String,         // User ID who created this session
+
+    // Scope — actions allowed in this session
+    // (pre-checked by server, also available for policy conditions)
+    scope: Set<String>,
+
+    // Budget tracking
+    remaining_tokens: Long,       // -1 = unlimited
+    remaining_cost_cents: Long,   // in cents, -1 = unlimited
+    remaining_calls: Long,        // -1 = unlimited
+
+    // Chain depth (incremented per tool→tool call)
+    chain_depth: Long,
+    max_chain_depth: Long,
+
+    // Request metadata
+    request_ip?: ipaddr,
+    user_consent?: Bool,          // explicit user approval for this action
+    approval_status?: String,     // "none" | "pending" | "approved" | "denied"
 };
 
-entity Group in [Organization] {
-    description: String,
-};
-
-entity Organization {
-    plan: String,  // "free" | "pro" | "enterprise"
-};
-
-entity Agent in [AgentGroup] {
-    delegator: User,
-    framework: String,     // "openclaw" | "langchain" | "crewai"
-    version: String,
-    risk_level: String,    // "low" | "medium" | "high"
-    banned: Bool,
-};
-
-entity AgentGroup {
-    description: String,
-};
-
-// ─── Resource Types ───
-
-entity Service {
-    owner: User,
-    sensitivity: String,  // "public" | "internal" | "secret"
-};
-
-entity Tool in [Service] {
-    risk: String,          // "low" | "medium" | "high" | "critical"
+// Tool capability descriptor (registered by MCP servers)
+type ToolCapability = {
+    risk: String,                 // "low" | "medium" | "high" | "critical"
     reversible: Bool,
     requires_approval: Bool,
 };
 
-entity Resource in [Service] {
-    owner: User,
-    sensitivity: String,
-    sandbox: Bool,
+// ─────────────────────────────────────────────
+// Principal Types (Who is making the request?)
+// ─────────────────────────────────────────────
+
+// Human user — the ultimate authority
+entity User in [UserGroup, Organization] {
+    email: String,
+    role: String,                 // "admin" | "developer" | "viewer"
+    mfa_enabled: Bool,
+    suspended: Bool,
+};
+
+entity UserGroup in [Organization] {
+    description?: String,
+};
+
+entity Organization {
+    plan: String,                 // "free" | "pro" | "enterprise"
+    max_agents: Long,
+};
+
+// AI Agent — acts on behalf of a User
+entity Agent in [AgentGroup] {
+    // Delegation relationship
+    delegator: User,              // who this agent acts for
+
+    // Agent metadata
+    framework: String,            // "openclaw" | "langchain" | "crewai" | "custom"
+    version?: String,
+    model?: String,               // "claude-4" | "gpt-5" etc.
+
+    // Security attributes
+    risk_level: String,           // "low" | "medium" | "high"
+    banned: Bool,
+    sandbox_only: Bool,           // if true, can only access sandbox resources
+};
+
+entity AgentGroup {
+    description?: String,
+    max_chain_depth: Long,        // default chain depth limit for this group
+};
+
+// ─────────────────────────────────────────────
+// Resource Types (What is being accessed?)
+// ─────────────────────────────────────────────
+
+// Generic service (top-level resource container)
+entity Service {
+    owner?: User,
+    sensitivity: String,          // "public" | "internal" | "confidential" | "secret"
+    environment: String,          // "production" | "staging" | "development" | "sandbox"
+};
+
+// Tool / MCP Server (invocable capability)
+entity Tool in [ToolGroup, Service] {
+    capability: ToolCapability,
+    description?: String,
+};
+
+entity ToolGroup in [Service] {
+    description?: String,
+};
+
+// Data resource (files, databases, API endpoints)
+entity Resource in [ResourceGroup, Service] {
+    owner?: User,
+    sensitivity: String,          // "public" | "internal" | "confidential" | "secret"
+    environment: String,          // "production" | "staging" | "development" | "sandbox"
+    sandbox: Bool,                // is this a sandbox resource?
     private: Bool,
 };
 
-// ─── Action Definitions ───
-
-// Tool invocation actions
-action "tool:invoke" appliesTo {
-    principal: [Agent],
-    resource: [Tool],
+entity ResourceGroup in [Service] {
+    description?: String,
 };
 
-// Read actions
-action "read" appliesTo {
-    principal: [User, Agent],
-    resource: [Resource, Service],
-};
+// ─────────────────────────────────────────────
+// Action Definitions
+// ─────────────────────────────────────────────
 
-action "list" appliesTo {
-    principal: [User, Agent],
-    resource: [Resource, Service],
-};
+// -- Action Groups (for ergonomic policy writing) --
 
-// Write actions
-action "write" appliesTo {
-    principal: [User, Agent],
-    resource: [Resource, Service],
-};
+// Read-only actions
+action readActions;
 
-action "create" appliesTo {
-    principal: [User, Agent],
-    resource: [Resource, Service],
-};
+// Write actions (create, update)
+action writeActions;
 
-// Dangerous actions
-action "delete" appliesTo {
-    principal: [User, Agent],
-    resource: [Resource, Service],
-};
+// Dangerous actions (delete, execute, send)
+action dangerousActions;
 
-action "execute_code" appliesTo {
-    principal: [Agent],
-    resource: [Resource],
-};
+// All tool invocation actions
+action toolActions;
 
-action "send_email" appliesTo {
-    principal: [Agent],
-    resource: [Resource],
-};
+// Admin actions
+action adminActions;
 
-action "send_money" appliesTo {
-    principal: [Agent],
-    resource: [Resource],
-};
+// -- Read Actions --
 
-// Delegation actions
-action "delegate" appliesTo {
-    principal: [User],
-    resource: [Agent],
-};
+action read in [readActions]
+    appliesTo {
+        principal: [User, Agent],
+        resource: [Resource, ResourceGroup, Service],
+        context: SessionContext,
+    };
+
+action list in [readActions]
+    appliesTo {
+        principal: [User, Agent],
+        resource: [Resource, ResourceGroup, Service],
+        context: SessionContext,
+    };
+
+action search in [readActions]
+    appliesTo {
+        principal: [User, Agent],
+        resource: [Resource, ResourceGroup, Service],
+        context: SessionContext,
+    };
+
+// -- Write Actions --
+
+action write in [writeActions]
+    appliesTo {
+        principal: [User, Agent],
+        resource: [Resource, ResourceGroup, Service],
+        context: SessionContext,
+    };
+
+action create in [writeActions]
+    appliesTo {
+        principal: [User, Agent],
+        resource: [Resource, ResourceGroup, Service],
+        context: SessionContext,
+    };
+
+action update in [writeActions]
+    appliesTo {
+        principal: [User, Agent],
+        resource: [Resource, ResourceGroup, Service],
+        context: SessionContext,
+    };
+
+// -- Dangerous Actions --
+
+action delete in [dangerousActions]
+    appliesTo {
+        principal: [User, Agent],
+        resource: [Resource, ResourceGroup, Service],
+        context: SessionContext,
+    };
+
+action execute in [dangerousActions]
+    appliesTo {
+        principal: [Agent],
+        resource: [Resource],
+        context: SessionContext,
+    };
+
+action send_email in [dangerousActions]
+    appliesTo {
+        principal: [Agent],
+        resource: [Resource, Service],
+        context: SessionContext,
+    };
+
+action send_money in [dangerousActions]
+    appliesTo {
+        principal: [Agent],
+        resource: [Resource, Service],
+        context: SessionContext,
+    };
+
+// -- Tool Invocation Actions --
+
+action invoke_tool in [toolActions]
+    appliesTo {
+        principal: [Agent],
+        resource: [Tool],
+        context: SessionContext,
+    };
+
+action configure_tool in [toolActions, adminActions]
+    appliesTo {
+        principal: [User],
+        resource: [Tool],
+        context: SessionContext,
+    };
+
+// -- Admin Actions --
+
+action manage_policy in [adminActions]
+    appliesTo {
+        principal: [User],
+        resource: [Service],
+        context: SessionContext,
+    };
+
+action manage_session in [adminActions]
+    appliesTo {
+        principal: [User],
+        resource: [Service],
+        context: SessionContext,
+    };
+
+action view_audit in [adminActions]
+    appliesTo {
+        principal: [User],
+        resource: [Service],
+        context: SessionContext,
+    };
+
+// -- Delegation Action --
+
+action delegate
+    appliesTo {
+        principal: [User],
+        resource: [Agent],
+        context: SessionContext,
+    };
+
+}

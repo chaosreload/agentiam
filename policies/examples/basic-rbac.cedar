@@ -1,47 +1,76 @@
-// Example: Basic RBAC policies for AgentIAM
-// Role-based access control for agents and users
+// ═══════════════════════════════════════════════════════════════════
+// AgentIAM Example: Basic RBAC Policies
+// ═══════════════════════════════════════════════════════════════════
 
 // ─── Admin Full Access ───
-
-@id("admin-full-access")
+@id("rbac-admin-full-access")
 permit (
-  principal in Group::"admins",
+  principal is AgentIAM::User,
   action,
-  resource
-);
-
-// ─── Research Agent — Read-only access ───
-
-@id("research-agent-read")
-permit (
-  principal == Agent::"research-scout",
-  action in [Action::"read", Action::"list"],
   resource
 )
 when {
-  resource.sensitivity != "secret"
+  principal.role == "admin"
 };
 
-// ─── Coding Agent — Read + Write in sandbox ───
-
-@id("coding-agent-sandbox")
+// ─── Research Agent: Read Non-Confidential Resources ───
+@id("rbac-research-agent-read")
 permit (
-  principal == Agent::"coding-agent",
-  action in [Action::"read", Action::"list", Action::"write", Action::"create", Action::"execute_code"],
-  resource
+  principal == AgentIAM::Agent::"research-scout",
+  action in [AgentIAM::Action::"read", AgentIAM::Action::"list", AgentIAM::Action::"search"],
+  resource is AgentIAM::Resource
+)
+when {
+  resource.sensitivity == "public" || resource.sensitivity == "internal"
+};
+
+// ─── Research Agent: Low/Medium Risk Tool Invocation ───
+@id("rbac-research-agent-tools")
+permit (
+  principal == AgentIAM::Agent::"research-scout",
+  action == AgentIAM::Action::"invoke_tool",
+  resource is AgentIAM::Tool
+)
+when {
+  resource.capability.risk == "low" || resource.capability.risk == "medium"
+};
+
+// ─── Coding Agent: Sandbox Full Access ───
+@id("rbac-coding-agent-sandbox")
+permit (
+  principal == AgentIAM::Agent::"coding-agent",
+  action,
+  resource is AgentIAM::Resource
 )
 when {
   resource.sandbox == true
 };
 
-// ─── User owns resource — full access ───
-
-@id("owner-full-access")
+// ─── Resource Owner: Full Access ───
+@id("rbac-owner-full-access")
 permit (
-  principal is User,
+  principal is AgentIAM::User,
   action,
-  resource
+  resource is AgentIAM::Resource
 )
 when {
-  principal == resource.owner
+  resource has owner && principal == resource.owner
+};
+
+// ─── Developer: Read + Write (non-production) ───
+@id("rbac-developer-readwrite")
+permit (
+  principal is AgentIAM::User,
+  action in [
+    AgentIAM::Action::"read",
+    AgentIAM::Action::"list",
+    AgentIAM::Action::"write",
+    AgentIAM::Action::"create",
+    AgentIAM::Action::"update"
+  ],
+  resource is AgentIAM::Resource
+)
+when {
+  principal.role == "developer" &&
+  resource.environment != "production"
 };
