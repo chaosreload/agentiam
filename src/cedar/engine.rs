@@ -7,10 +7,16 @@ use cedar_policy::{
     ValidationResult, Validator,
 };
 
+// Used in Week 2+ when axum handlers list policies
+#[allow(dead_code)]
 pub struct PolicyInfo {
     pub id: String,
 }
 
+// Used in Week 2+ as the core authorization engine behind axum handlers.
+// Thread safety: is_authorized takes &self (concurrent reads OK), but reload takes &mut self.
+// Week 3 axum integration should wrap in Arc<RwLock<CedarEngine>>.
+#[allow(dead_code)]
 pub struct CedarEngine {
     policy_set: PolicySet,
     schema: Schema,
@@ -18,6 +24,7 @@ pub struct CedarEngine {
     validator: Validator,
 }
 
+#[allow(dead_code)]
 impl CedarEngine {
     pub fn new(schema_path: &Path, policies_dir: &Path) -> Result<Self> {
         let schema_src =
@@ -104,6 +111,8 @@ impl CedarEngine {
     }
 }
 
+// Used in Week 2+ by request handlers to parse entity UIDs from API input
+#[allow(dead_code)]
 pub fn parse_entity_uid(s: &str) -> Result<EntityUid> {
     EntityUid::from_str(s).map_err(|e| anyhow::anyhow!("invalid entity UID '{s}': {e}"))
 }
@@ -258,7 +267,7 @@ mod tests {
     #[test]
     fn test_default_deny_no_matching_policy() {
         let engine = make_engine();
-        let entities = make_entities(engine.schema());
+        let _entities = make_entities(engine.schema());
         let action = parse_entity_uid(r#"AgentIAM::Action::"read""#).unwrap();
         // Use an agent that has no permit policies matching
         let unknown_agent_json = serde_json::json!([
@@ -447,5 +456,61 @@ mod tests {
             .expect("reload should succeed");
         let count_after = engine.list_policies().len();
         assert_eq!(count_before, count_after);
+    }
+
+    #[test]
+    fn test_is_authorized_empty_entities_invalid_session_denies() {
+        let engine = make_engine();
+        let action = parse_entity_uid(r#"AgentIAM::Action::"read""#).unwrap();
+        let mut ctx_json = valid_session_context();
+        ctx_json["session_valid"] = serde_json::json!(false);
+        let ctx = make_context(ctx_json, &action, engine.schema());
+        let request = Request::new(
+            parse_entity_uid(r#"AgentIAM::Agent::"ghost""#).unwrap(),
+            action,
+            parse_entity_uid(r#"AgentIAM::Resource::"nothing""#).unwrap(),
+            ctx,
+            Some(engine.schema()),
+        )
+        .unwrap();
+
+        let response = engine.is_authorized(&request, &Entities::empty());
+        assert_eq!(
+            response.decision(),
+            Decision::Deny,
+            "empty entity store with invalid session should deny"
+        );
+    }
+
+    #[test]
+    fn test_parse_entity_uid_valid() {
+        let uid = parse_entity_uid(r#"AgentIAM::User::"alice""#);
+        assert!(uid.is_ok());
+    }
+
+    #[test]
+    fn test_parse_entity_uid_invalid() {
+        let uid = parse_entity_uid("not a valid uid!!!");
+        assert!(uid.is_err());
+    }
+
+    #[test]
+    fn test_validate_policy_unparseable() {
+        let engine = make_engine();
+        let result = engine.validate_policy("this is not cedar policy syntax {{{");
+        assert!(result.is_err(), "unparseable policy text should return Err");
+    }
+
+    #[test]
+    fn test_reload_nonexistent_dir_is_empty() {
+        let mut engine = make_engine();
+        // Reloading from a non-existent directory yields an empty policy set
+        engine
+            .reload(Path::new("/tmp/nonexistent_policies_dir_agentiam"))
+            .expect("reload from nonexistent dir should succeed (empty)");
+        assert!(
+            engine.list_policies().is_empty(),
+            "reloading from nonexistent dir should yield empty policy set"
+        );
     }
 }
