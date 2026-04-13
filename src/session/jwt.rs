@@ -1,4 +1,4 @@
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, TokenData, Validation};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, TokenData, Validation, decode, encode};
 use serde::de::DeserializeOwned;
 
 use crate::error::AgentIAMError;
@@ -108,10 +108,7 @@ mod tests {
         let token = sign_session_token(&claims, TEST_SECRET).unwrap();
         let data: TokenData<SessionTokenClaims> = verify_token(&token, TEST_SECRET).unwrap();
         assert_eq!(data.claims.jti, "sess-001");
-        assert_eq!(
-            data.claims.delegator,
-            r#"AgentIAM::User::"alice""#
-        );
+        assert_eq!(data.claims.delegator, r#"AgentIAM::User::"alice""#);
         assert_eq!(data.claims.scope.len(), 2);
         assert_eq!(data.claims.max_chain_depth, 5);
     }

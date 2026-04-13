@@ -69,10 +69,7 @@ pub async fn store_api_key(
 }
 
 /// Verify an API key against the database. Returns the key info if valid.
-pub async fn verify_api_key(
-    key: &str,
-    db: &SqlitePool,
-) -> Result<ApiKeyInfo, AgentIAMError> {
+pub async fn verify_api_key(key: &str, db: &SqlitePool) -> Result<ApiKeyInfo, AgentIAMError> {
     let key_hash = hash_key(key);
 
     let row = sqlx::query_as::<_, (String, String, String, i64, i64)>(

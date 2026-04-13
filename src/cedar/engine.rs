@@ -3,8 +3,8 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use cedar_policy::{
-    Authorizer, Entities, EntityUid, PolicySet, Request, Schema, ValidationMode,
-    ValidationResult, Validator,
+    Authorizer, Entities, EntityUid, PolicySet, Request, Schema, ValidationMode, ValidationResult,
+    Validator,
 };
 
 // Used in Week 2+ when axum handlers list policies
@@ -99,10 +99,8 @@ impl CedarEngine {
             if path.is_dir() {
                 Self::collect_cedar_files(&path, buf)?;
             } else if path.extension().is_some_and(|ext| ext == "cedar") {
-                let content =
-                    std::fs::read_to_string(&path).with_context(|| {
-                        format!("failed to read policy: {}", path.display())
-                    })?;
+                let content = std::fs::read_to_string(&path)
+                    .with_context(|| format!("failed to read policy: {}", path.display()))?;
                 buf.push_str(&content);
                 buf.push('\n');
             }

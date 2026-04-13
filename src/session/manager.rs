@@ -121,7 +121,8 @@ impl SessionManager {
             None => Err(AgentIAMError::SessionNotFound(session_id.to_string())),
             Some(r) => {
                 let session = Self::row_to_session(r);
-                self.sessions.insert(session_id.to_string(), session.clone());
+                self.sessions
+                    .insert(session_id.to_string(), session.clone());
                 Ok(session)
             }
         }
@@ -147,7 +148,22 @@ impl SessionManager {
         }
         sql.push_str(" ORDER BY created_at DESC");
 
-        let mut query = sqlx::query_as::<_, (String, String, String, String, String, i32, String, Option<String>, i64, i64, i64)>(&sql);
+        let mut query = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                String,
+                String,
+                i32,
+                String,
+                Option<String>,
+                i64,
+                i64,
+                i64,
+            ),
+        >(&sql);
         for b in &binds {
             query = query.bind(b);
         }
@@ -242,21 +258,30 @@ impl SessionManager {
 
     #[allow(clippy::type_complexity)]
     fn row_to_session(
-        r: (String, String, String, String, String, i32, String, Option<String>, i64, i64, i64),
+        r: (
+            String,
+            String,
+            String,
+            String,
+            String,
+            i32,
+            String,
+            Option<String>,
+            i64,
+            i64,
+            i64,
+        ),
     ) -> Session {
-        let scope: Vec<String> =
-            serde_json::from_str(&r.3).unwrap_or_default();
-        let budget: Budget =
-            serde_json::from_str(&r.4).unwrap_or(Budget {
-                max_tokens: 0,
-                max_cost_cents: 0,
-                max_calls: 0,
-                used_tokens: 0,
-                used_cost_cents: 0,
-                used_calls: 0,
-            });
-        let delegation_chain: Vec<String> =
-            serde_json::from_str(&r.6).unwrap_or_default();
+        let scope: Vec<String> = serde_json::from_str(&r.3).unwrap_or_default();
+        let budget: Budget = serde_json::from_str(&r.4).unwrap_or(Budget {
+            max_tokens: 0,
+            max_cost_cents: 0,
+            max_calls: 0,
+            used_tokens: 0,
+            used_cost_cents: 0,
+            used_calls: 0,
+        });
+        let delegation_chain: Vec<String> = serde_json::from_str(&r.6).unwrap_or_default();
         let metadata: Option<std::collections::HashMap<String, String>> =
             r.7.as_deref().and_then(|s| serde_json::from_str(s).ok());
 
@@ -323,7 +348,9 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        SessionManager::new(pool, TEST_SECRET.to_vec()).await.unwrap()
+        SessionManager::new(pool, TEST_SECRET.to_vec())
+            .await
+            .unwrap()
     }
 
     fn make_request() -> CreateSessionRequest {
@@ -382,10 +409,7 @@ mod tests {
         mgr.create_session(make_request()).await.unwrap();
         mgr.create_session(make_request()).await.unwrap();
 
-        let sessions = mgr
-            .list_sessions(SessionFilter::default())
-            .await
-            .unwrap();
+        let sessions = mgr.list_sessions(SessionFilter::default()).await.unwrap();
         assert_eq!(sessions.len(), 2);
     }
 
@@ -455,10 +479,7 @@ mod tests {
             cost_cents: 100,
             calls: 5,
         };
-        let status = mgr
-            .update_budget(&session.session_id, usage)
-            .await
-            .unwrap();
+        let status = mgr.update_budget(&session.session_id, usage).await.unwrap();
         assert!(!status.exhausted);
         assert_eq!(status.budget.used_tokens, 500);
         assert_eq!(status.budget.used_cost_cents, 100);
@@ -475,10 +496,7 @@ mod tests {
             cost_cents: 0,
             calls: 0,
         };
-        let status = mgr
-            .update_budget(&session.session_id, usage)
-            .await
-            .unwrap();
+        let status = mgr.update_budget(&session.session_id, usage).await.unwrap();
         assert!(status.exhausted);
     }
 

@@ -4,9 +4,7 @@ use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 
 use crate::error::AgentIAMError;
-use crate::models::{
-    AccessTokenClaims, AgentIAMClaims, OAuthClient, OAUTH_SCOPES,
-};
+use crate::models::{AccessTokenClaims, AgentIAMClaims, OAUTH_SCOPES, OAuthClient};
 use crate::session::jwt;
 
 /// Create the oauth_clients table if it doesn't exist.
@@ -59,8 +57,8 @@ pub async fn register_client(
     let client_secret = format!("secret_{}", random_hex(24));
     let secret_hash = hash_secret(&client_secret);
     let now = Utc::now().timestamp();
-    let scopes_json = serde_json::to_string(&scopes)
-        .map_err(|e| AgentIAMError::Internal(e.to_string()))?;
+    let scopes_json =
+        serde_json::to_string(&scopes).map_err(|e| AgentIAMError::Internal(e.to_string()))?;
 
     sqlx::query(
         "INSERT INTO oauth_clients (client_id, client_secret_hash, name, scopes, created_at, revoked) VALUES (?, ?, ?, ?, ?, 0)",
