@@ -183,7 +183,7 @@ impl SessionManager {
         session_id: &str,
         usage: BudgetUsage,
     ) -> Result<BudgetStatus, AgentIAMError> {
-        let mut session = self.get_session(session_id).await?;
+        let session = self.get_session(session_id).await?;
 
         if session.revoked {
             return Err(AgentIAMError::SessionRevoked(session_id.to_string()));
@@ -194,30 +194,32 @@ impl SessionManager {
             return Err(AgentIAMError::SessionExpired(session_id.to_string()));
         }
 
-        session.budget.used_tokens += usage.tokens;
-        session.budget.used_cost_cents += usage.cost_cents;
-        session.budget.used_calls += usage.calls;
+        // Atomic SQL update: add usage to existing budget values in a single statement
+        // This avoids the read-modify-write race condition on concurrent updates.
+        let updated_budget_row = sqlx::query_as::<_, (String,)>(
+            "UPDATE sessions SET budget = json_set(budget,
+                '$.used_tokens', json_extract(budget, '$.used_tokens') + ?,
+                '$.used_cost_cents', json_extract(budget, '$.used_cost_cents') + ?,
+                '$.used_calls', json_extract(budget, '$.used_calls') + ?
+            ) WHERE session_id = ? RETURNING budget",
+        )
+        .bind(usage.tokens)
+        .bind(usage.cost_cents)
+        .bind(usage.calls)
+        .bind(session_id)
+        .fetch_one(&self.db)
+        .await?;
 
-        let exhausted = session.budget.is_exhausted();
-
-        // Persist updated budget
-        let budget_json = serde_json::to_string(&session.budget)
+        let budget: Budget = serde_json::from_str(&updated_budget_row.0)
             .map_err(|e| AgentIAMError::Internal(e.to_string()))?;
-        sqlx::query("UPDATE sessions SET budget = ? WHERE session_id = ?")
-            .bind(&budget_json)
-            .bind(session_id)
-            .execute(&self.db)
-            .await?;
+        let exhausted = budget.is_exhausted();
 
-        let status = BudgetStatus {
-            budget: session.budget.clone(),
-            exhausted,
-        };
+        // Update cache with the authoritative DB value
+        if let Some(mut s) = self.sessions.get_mut(session_id) {
+            s.budget = budget.clone();
+        }
 
-        // Update cache
-        self.sessions.insert(session_id.to_string(), session);
-
-        Ok(status)
+        Ok(BudgetStatus { budget, exhausted })
     }
 
     pub fn validate_token(&self, token: &str) -> Result<SessionTokenClaims, AgentIAMError> {
@@ -284,7 +286,9 @@ impl SessionManager {
         let meta_json = session
             .metadata
             .as_ref()
-            .map(|m| serde_json::to_string(m).unwrap_or_default());
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| AgentIAMError::Internal(e.to_string()))?;
 
         sqlx::query(
             "INSERT INTO sessions (session_id, delegator, agent, scope, budget, max_chain_depth, delegation_chain, metadata, created_at, expires_at, revoked) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
