@@ -24,6 +24,13 @@ use crate::cedar::entities::EntityStore;
 use crate::config::AppConfig;
 use crate::session::manager::SessionManager;
 
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to install CTRL+C signal handler");
+    tracing::info!("shutdown signal received");
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -66,10 +73,16 @@ async fn main() -> anyhow::Result<()> {
         db,
     });
 
-    let app = build_router(state);
+    let app = build_router(state.clone());
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", config.port)).await?;
     tracing::info!("listening on 0.0.0.0:{}", config.port);
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
+    // Flush remaining audit logs before exit
+    tracing::info!("flushing audit logs...");
+    state.audit_logger.flush_and_close().await;
 
     Ok(())
 }
