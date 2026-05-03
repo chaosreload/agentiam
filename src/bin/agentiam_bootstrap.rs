@@ -2,7 +2,10 @@ use clap::Parser;
 use sqlx::sqlite::SqlitePoolOptions;
 
 use agentiam::audit::logger::AuditLogger;
+use agentiam::metadata;
 use agentiam::token::apikey;
+
+const BOOTSTRAP_SEEDED_KEY: &str = "bootstrap_seeded";
 
 #[derive(Parser)]
 #[command(name = "agentiam-bootstrap", about = "Bootstrap the first API key")]
@@ -18,6 +21,10 @@ struct Cli {
     /// Scope for the key (e.g. '*' for all)
     #[arg(long, default_value = "*")]
     scope: String,
+
+    /// Force re-bootstrap even if already seeded
+    #[arg(long)]
+    force: bool,
 }
 
 #[tokio::main]
@@ -37,22 +44,28 @@ async fn main() -> anyhow::Result<()> {
 
     // Ensure tables exist
     apikey::ensure_table(&db).await?;
+    metadata::ensure_table(&db).await?;
 
-    // Check if a bootstrap key already exists
-    let existing = apikey::list_api_keys(&db).await?;
-    let has_bootstrap = existing
-        .iter()
-        .any(|k| k.name.starts_with("bootstrap") || k.name == cli.name);
-
-    if has_bootstrap {
-        eprintln!("ERROR: A bootstrap API key already exists. Refusing to create another.");
-        std::process::exit(1);
+    // Check DB marker for prior bootstrap
+    if let Some(prev) = metadata::get(&db, BOOTSTRAP_SEEDED_KEY).await? {
+        if cli.force {
+            eprintln!("WARNING: overriding previous bootstrap (seeded at {prev})");
+        } else {
+            eprintln!(
+                "ERROR: System already bootstrapped (seeded at {prev}). Use --force to override."
+            );
+            std::process::exit(1);
+        }
     }
 
     // Generate and store
     let id = uuid::Uuid::new_v4().to_string();
     let (plaintext_key, key_hash) = apikey::create_api_key("bootstrap");
     apikey::store_api_key(&db, &id, &cli.name, &key_hash, "bootstrap").await?;
+
+    // Mark bootstrap as done
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    metadata::set(&db, BOOTSTRAP_SEEDED_KEY, &timestamp).await?;
 
     // Write audit log
     let audit = AuditLogger::new(db.clone()).await?;
@@ -87,7 +100,10 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use sqlx::sqlite::SqlitePoolOptions;
 
+    use agentiam::metadata;
     use agentiam::token::apikey;
+
+    const BOOTSTRAP_SEEDED_KEY: &str = "bootstrap_seeded";
 
     async fn setup_db() -> sqlx::SqlitePool {
         let pool = SqlitePoolOptions::new()
@@ -95,37 +111,73 @@ mod tests {
             .await
             .unwrap();
         apikey::ensure_table(&pool).await.unwrap();
+        metadata::ensure_table(&pool).await.unwrap();
         pool
     }
 
     #[tokio::test]
-    async fn bootstrap_creates_key() {
+    async fn bootstrap_creates_key_and_sets_marker() {
         let db = setup_db().await;
+
+        // No marker yet
+        assert!(
+            metadata::get(&db, BOOTSTRAP_SEEDED_KEY)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // Simulate bootstrap
         let id = uuid::Uuid::new_v4().to_string();
         let (_, hash) = apikey::create_api_key("bootstrap");
         apikey::store_api_key(&db, &id, "bootstrap", &hash, "bootstrap")
+            .await
+            .unwrap();
+        metadata::set(&db, BOOTSTRAP_SEEDED_KEY, "2025-01-01T00:00:00Z")
             .await
             .unwrap();
 
         let keys = apikey::list_api_keys(&db).await.unwrap();
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].name, "bootstrap");
+
+        // Marker is set
+        let marker = metadata::get(&db, BOOTSTRAP_SEEDED_KEY).await.unwrap();
+        assert!(marker.is_some());
     }
 
     #[tokio::test]
     async fn bootstrap_idempotency_rejects_second() {
         let db = setup_db().await;
 
-        // First key
-        let id1 = uuid::Uuid::new_v4().to_string();
-        let (_, hash1) = apikey::create_api_key("bootstrap");
-        apikey::store_api_key(&db, &id1, "bootstrap", &hash1, "bootstrap")
+        // Simulate first bootstrap
+        metadata::set(&db, BOOTSTRAP_SEEDED_KEY, "2025-01-01T00:00:00Z")
             .await
             .unwrap();
 
-        // Simulate the idempotency check
-        let existing = apikey::list_api_keys(&db).await.unwrap();
-        let has_bootstrap = existing.iter().any(|k| k.name.starts_with("bootstrap"));
-        assert!(has_bootstrap, "should detect existing bootstrap key");
+        // Idempotency check: marker exists → should be rejected
+        let existing = metadata::get(&db, BOOTSTRAP_SEEDED_KEY).await.unwrap();
+        assert!(
+            existing.is_some(),
+            "should detect existing bootstrap marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_force_overrides_marker() {
+        let db = setup_db().await;
+
+        // Simulate first bootstrap
+        metadata::set(&db, BOOTSTRAP_SEEDED_KEY, "2025-01-01T00:00:00Z")
+            .await
+            .unwrap();
+
+        // With --force, we update the marker
+        metadata::set(&db, BOOTSTRAP_SEEDED_KEY, "2025-06-01T00:00:00Z")
+            .await
+            .unwrap();
+
+        let marker = metadata::get(&db, BOOTSTRAP_SEEDED_KEY).await.unwrap();
+        assert_eq!(marker.as_deref(), Some("2025-06-01T00:00:00Z"));
     }
 }

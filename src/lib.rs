@@ -5,6 +5,7 @@ pub mod auth;
 pub mod cedar;
 pub mod config;
 pub mod error;
+pub mod metadata;
 #[allow(dead_code)]
 pub mod models;
 #[allow(dead_code)]
