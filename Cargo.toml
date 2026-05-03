@@ -2,6 +2,7 @@
 name = "agentiam"
 version = "0.1.0"
 edition = "2024"
+autobenches = false
 
 [dependencies]
 cedar-policy = "4.3"
@@ -24,3 +25,19 @@ rand = "0.9"
 dashmap = "6"
 tower = "0.5"
 http-body-util = "0.1"
+clap = { version = "4", features = ["derive"] }
+
+[[bin]]
+name = "agentiam-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "agentiam-bootstrap"
+path = "src/bin/agentiam_bootstrap.rs"
+
+[dev-dependencies]
+futures = "0.3"
+
+[[test]]
+name = "authorize_bench"
+path = "benches/authorize_bench.rs"

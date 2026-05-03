@@ -35,6 +35,7 @@ pub fn verify_token<T: DeserializeOwned>(
     let mut validation = Validation::default();
     validation.validate_exp = true;
     validation.validate_aud = false;
+    validation.leeway = 0;
     let data = decode::<T>(token, &DecodingKey::from_secret(secret), &validation)?;
     Ok(data)
 }

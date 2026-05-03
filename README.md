@@ -4,6 +4,80 @@
 
 AgentIAM is a purpose-built identity and access management system for AI Agent scenarios. Built on [Cedar](https://www.cedarpolicy.com/) policy language, it brings AWS IAM-style authorization to the world of autonomous AI agents.
 
+## Quickstart
+
+### Docker (recommended)
+
+```bash
+# Build
+docker build -t agentiam:dev .
+
+# Run (SQLite + policies stored in ./data on the host)
+docker run -d -p 8080:8080 -v $PWD/data:/var/lib/agentiam --name agentiam agentiam:dev
+
+# Bootstrap the first API key
+docker exec agentiam agentiam-bootstrap --db-path /var/lib/agentiam/agentiam.db --name admin --scope '*'
+# => prints ak_bootstrap_... to stdout — copy it
+
+# Test
+curl -H "Authorization: Bearer <APIKEY>" http://localhost:8080/health
+```
+
+### From source
+
+```bash
+cargo run --release --bin agentiam-server
+# In another terminal:
+cargo run --bin agentiam-bootstrap -- --db-path agentiam.db --name admin --scope '*'
+```
+
+### REST API (19 endpoints)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Health check (no auth) |
+| POST | `/v1/authorize` | Evaluate a single authorization request |
+| POST | `/v1/authorize/batch` | Evaluate multiple authorization requests |
+| POST | `/v1/sessions` | Create a delegation session |
+| GET | `/v1/sessions` | List sessions (with optional filters) |
+| GET | `/v1/sessions/{id}` | Get session by ID |
+| DELETE | `/v1/sessions/{id}` | Revoke / delete a session |
+| POST | `/v1/sessions/{id}/budget` | Record budget usage for a session |
+| POST | `/v1/entities` | Create Cedar entities |
+| GET | `/v1/entities` | List all entities |
+| GET | `/v1/entities/{type}/{id}` | Get a single entity |
+| DELETE | `/v1/entities/{type}/{id}` | Delete an entity |
+| GET | `/v1/policies` | List loaded Cedar policies |
+| POST | `/v1/policies/validate` | Validate a Cedar policy |
+| POST | `/v1/policies/reload` | Hot-reload policies from disk |
+| GET | `/v1/audit/decisions` | Query audit decision log |
+| GET | `/v1/audit/decisions/{id}` | Get a single audit record |
+| GET | `/v1/audit/stats` | Aggregated audit statistics |
+| GET | `/v1/config` | View runtime configuration |
+
+All endpoints except `/health` require an API key via `Authorization: Bearer <key>`.
+
+### Performance
+
+Benchmark results (`cargo bench --bench authorize_bench`):
+
+| Metric | Value |
+|--------|-------|
+| p50 latency | 8.1 ms |
+| Throughput | 6 211 req/s |
+
+### Testing
+
+```bash
+# Unit + integration tests
+cargo test --all
+
+# Performance benchmark
+cargo bench --bench authorize_bench
+```
+
+---
+
 ## Why AgentIAM?
 
 Traditional IAM handles **Human → Service** authorization. But AI Agents introduce a fundamentally different model:
