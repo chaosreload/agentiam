@@ -48,10 +48,16 @@ pub async fn authorize(
 ) -> impl IntoResponse {
     let rid = new_request_id();
 
-    let claims = match state.session_manager.validate_token(&body.session_token) {
+    let mut claims = match state.session_manager.validate_token(&body.session_token) {
         Ok(c) => c,
         Err(e) => return ApiError::from_err(e, &rid).into_response(),
     };
+
+    // Fetch fresh budget from DB (not the stale JWT snapshot)
+    match state.session_manager.get_budget(&claims.jti).await {
+        Ok(budget) => claims.budget = budget,
+        Err(e) => return ApiError::from_err(e, &rid).into_response(),
+    }
 
     // Check scope
     if !claims.scope.contains(&body.action) {
@@ -103,10 +109,16 @@ pub async fn authorize_batch(
 ) -> impl IntoResponse {
     let rid = new_request_id();
 
-    let claims = match state.session_manager.validate_token(&body.session_token) {
+    let mut claims = match state.session_manager.validate_token(&body.session_token) {
         Ok(c) => c,
         Err(e) => return ApiError::from_err(e, &rid).into_response(),
     };
+
+    // Fetch fresh budget from DB (not the stale JWT snapshot)
+    match state.session_manager.get_budget(&claims.jti).await {
+        Ok(budget) => claims.budget = budget,
+        Err(e) => return ApiError::from_err(e, &rid).into_response(),
+    }
 
     let mut results = Vec::new();
     for item in &body.requests {

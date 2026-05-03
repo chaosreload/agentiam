@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use chrono::Utc;
 use dashmap::DashMap;
 use sqlx::SqlitePool;
@@ -11,10 +13,12 @@ use crate::session::jwt;
 
 const DEFAULT_SESSION_TTL_SECS: i64 = 3600;
 const DEFAULT_MAX_CHAIN_DEPTH: i32 = 5;
+const BUDGET_CACHE_TTL_SECS: u64 = 5;
 
 pub struct SessionManager {
     sessions: DashMap<String, Session>,
     revocation_list: DashMap<String, i64>, // session_id -> revoked_at timestamp
+    budget_cache: DashMap<String, (Budget, Instant)>,
     db: SqlitePool,
     jwt_secret: Vec<u8>,
 }
@@ -25,6 +29,7 @@ impl SessionManager {
         Ok(Self {
             sessions: DashMap::new(),
             revocation_list: DashMap::new(),
+            budget_cache: DashMap::new(),
             db,
             jwt_secret,
         })
@@ -230,12 +235,44 @@ impl SessionManager {
             .map_err(|e| AgentIAMError::Internal(e.to_string()))?;
         let exhausted = budget.is_exhausted();
 
-        // Update cache with the authoritative DB value
+        // Update caches with the authoritative DB value
         if let Some(mut s) = self.sessions.get_mut(session_id) {
             s.budget = budget.clone();
         }
+        self.budget_cache
+            .insert(session_id.to_string(), (budget.clone(), Instant::now()));
 
         Ok(BudgetStatus { budget, exhausted })
+    }
+
+    /// Fetch the current budget for a session from cache (TTL-based) or DB.
+    /// This is the authoritative source for budget checks in the authorize path.
+    pub async fn get_budget(&self, session_id: &str) -> Result<Budget, AgentIAMError> {
+        // Check TTL cache first
+        if let Some(entry) = self.budget_cache.get(session_id) {
+            let (ref budget, ref cached_at) = *entry;
+            if cached_at.elapsed().as_secs() < BUDGET_CACHE_TTL_SECS {
+                return Ok(budget.clone());
+            }
+        }
+
+        // Cache miss or expired — query DB for just the budget column
+        let row =
+            sqlx::query_as::<_, (String,)>("SELECT budget FROM sessions WHERE session_id = ?")
+                .bind(session_id)
+                .fetch_optional(&self.db)
+                .await?;
+
+        match row {
+            None => Err(AgentIAMError::SessionNotFound(session_id.to_string())),
+            Some(r) => {
+                let budget: Budget = serde_json::from_str(&r.0)
+                    .map_err(|e| AgentIAMError::Internal(e.to_string()))?;
+                self.budget_cache
+                    .insert(session_id.to_string(), (budget.clone(), Instant::now()));
+                Ok(budget)
+            }
+        }
     }
 
     pub fn validate_token(&self, token: &str) -> Result<SessionTokenClaims, AgentIAMError> {
@@ -554,5 +591,64 @@ mod tests {
         // Should fetch from DB
         let fetched = mgr.get_session(&session.session_id).await.unwrap();
         assert_eq!(fetched.session_id, session.session_id);
+    }
+
+    #[tokio::test]
+    async fn test_get_budget_reflects_db_update() {
+        let mgr = setup().await;
+        let session = mgr.create_session(make_request()).await.unwrap();
+
+        // Initial budget should have 0 used tokens
+        let budget = mgr.get_budget(&session.session_id).await.unwrap();
+        assert_eq!(budget.used_tokens, 0);
+        assert_eq!(budget.remaining_tokens(), 10000);
+
+        // Consume some tokens via update_budget
+        let usage = BudgetUsage {
+            tokens: 3000,
+            cost_cents: 50,
+            calls: 2,
+        };
+        mgr.update_budget(&session.session_id, usage).await.unwrap();
+
+        // get_budget must return the updated value
+        let budget = mgr.get_budget(&session.session_id).await.unwrap();
+        assert_eq!(budget.used_tokens, 3000);
+        assert_eq!(budget.remaining_tokens(), 7000);
+    }
+
+    #[tokio::test]
+    async fn test_get_budget_cache_hit() {
+        let mgr = setup().await;
+        let session = mgr.create_session(make_request()).await.unwrap();
+
+        // First call populates cache
+        let b1 = mgr.get_budget(&session.session_id).await.unwrap();
+        // Second call should hit cache (same result, no error)
+        let b2 = mgr.get_budget(&session.session_id).await.unwrap();
+        assert_eq!(b1.max_tokens, b2.max_tokens);
+        assert_eq!(b1.used_tokens, b2.used_tokens);
+
+        // Verify cache entry exists
+        assert!(mgr.budget_cache.contains_key(&session.session_id));
+    }
+
+    #[tokio::test]
+    async fn test_get_budget_exhausted_after_update() {
+        let mgr = setup().await;
+        let session = mgr.create_session(make_request()).await.unwrap();
+
+        // Exhaust the budget
+        let usage = BudgetUsage {
+            tokens: 10000,
+            cost_cents: 5000,
+            calls: 100,
+        };
+        mgr.update_budget(&session.session_id, usage).await.unwrap();
+
+        // get_budget should reflect exhaustion
+        let budget = mgr.get_budget(&session.session_id).await.unwrap();
+        assert!(budget.is_exhausted());
+        assert_eq!(budget.remaining_tokens(), 0);
     }
 }
