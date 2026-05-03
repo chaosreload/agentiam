@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)] // TrySendError<AuditRecord> is 312B — boxing adds alloc on hot audit path for a rare-error type we do not own
+
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
