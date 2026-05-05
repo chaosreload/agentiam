@@ -501,14 +501,14 @@ Agent Framework                    AgentIAM
 | GET | /v1/api-keys | 列出 API Key |
 | DELETE | /v1/api-keys/{id} | 吊销 API Key |
 | POST | /v1/oauth/token | 获取 Access Token（Client Credentials） |
+| POST | /v1/oauth/clients | 注册 OAuth Client（API Key 鉴权） |
+| GET | /v1/oauth/clients | 列出 OAuth Clients（API Key 鉴权） |
+| DELETE | /v1/oauth/clients/{id} | 吊销 OAuth Client（API Key 鉴权） |
 
 ### 新增端点（Phase 2）
 
 | Method | Path | 说明 |
 |--------|------|------|
-| POST | /v1/oauth/clients | 注册 OAuth Client |
-| GET | /v1/oauth/clients | 列出 OAuth Clients |
-| DELETE | /v1/oauth/clients/{id} | 删除 OAuth Client |
 | GET | /v1/oauth/authorize | OAuth 2.0 授权端点（Auth Code flow） |
 | GET | /.well-known/jwks.json | 公钥发布 |
 | GET | /.well-known/openid-configuration | OIDC Discovery |

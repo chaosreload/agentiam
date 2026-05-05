@@ -63,6 +63,8 @@ async fn main() -> anyhow::Result<()> {
 
     // API key table
     crate::token::apikey::ensure_table(&db).await?;
+    // OAuth clients table
+    crate::token::oauth::ensure_table(&db).await?;
 
     let state = Arc::new(AppState {
         cedar_engine: RwLock::new(engine),

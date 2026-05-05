@@ -930,6 +930,10 @@ class AuditStats:
 | `GET` | `/v1/audit/stats` | 审计统计 |
 | `GET` | `/health` | 健康检查 |
 | `GET` | `/v1/config` | 服务配置 |
+| `POST` | `/v1/oauth/clients` | 注册 OAuth Client（API Key 鉴权） |
+| `GET` | `/v1/oauth/clients` | 列出 OAuth Clients（API Key 鉴权） |
+| `DELETE` | `/v1/oauth/clients/{id}` | 吊销 OAuth Client（API Key 鉴权） |
+| `POST` | `/v1/oauth/token` | OAuth 2.0 Client Credentials Grant（公开） |
 
 ### Phase 2 (预留)
 

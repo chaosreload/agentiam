@@ -5,7 +5,7 @@ use axum::middleware;
 use axum::routing::{delete, get, post};
 use sqlx::SqlitePool;
 
-use crate::api::handlers::{audit, authorize, entities, health, policies, sessions};
+use crate::api::handlers::{audit, auth, authorize, entities, health, policies, sessions};
 use crate::api::middleware::api_key_auth;
 use crate::audit::logger::AuditLogger;
 use crate::cedar::engine::CedarEngine;
@@ -59,13 +59,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/audit/decisions", get(audit::list_decisions))
         .route("/v1/audit/decisions/{id}", get(audit::get_decision))
         .route("/v1/audit/stats", get(audit::get_stats))
+        // OAuth client management (admin)
+        .route("/v1/oauth/clients", post(auth::register_oauth_client))
+        .route("/v1/oauth/clients", get(auth::list_oauth_clients))
+        .route(
+            "/v1/oauth/clients/{client_id}",
+            delete(auth::delete_oauth_client),
+        )
         // Config
         .route("/v1/config", get(get_config))
         .layer(middleware::from_fn_with_state(state.clone(), api_key_auth));
 
-    // Health — no auth, but still needs state
+    // Public routes — no auth
     Router::<Arc<AppState>>::new()
         .route("/health", get(health::health))
+        .route("/v1/oauth/token", post(auth::oauth_token))
         .merge(authed)
         .with_state(state)
 }

@@ -7,6 +7,9 @@ use crate::error::AgentIAMError;
 use crate::models::{AccessTokenClaims, AgentIAMClaims, OAUTH_SCOPES, OAuthClient};
 use crate::session::jwt;
 
+/// Access token TTL in seconds (1 hour).
+pub const OAUTH_ACCESS_TOKEN_TTL_SECONDS: i64 = 3600;
+
 /// Create the oauth_clients table if it doesn't exist.
 pub async fn ensure_table(db: &SqlitePool) -> Result<(), AgentIAMError> {
     sqlx::query(
@@ -151,6 +154,39 @@ pub fn issue_access_token(
     };
 
     jwt::sign_access_token(&claims, jwt_secret)
+}
+
+/// List all OAuth clients (without exposing secret hashes).
+pub async fn list_clients(db: &SqlitePool) -> Result<Vec<OAuthClient>, AgentIAMError> {
+    let rows = sqlx::query_as::<_, (String, String, String, i64, i64)>(
+        "SELECT client_id, name, scopes, created_at, revoked FROM oauth_clients ORDER BY created_at DESC",
+    )
+    .fetch_all(db)
+    .await?;
+
+    let mut clients = Vec::with_capacity(rows.len());
+    for (client_id, name, scopes_json, created_at, revoked) in rows {
+        let scopes: Vec<String> = serde_json::from_str(&scopes_json)
+            .map_err(|e| AgentIAMError::Internal(e.to_string()))?;
+        clients.push(OAuthClient {
+            client_id,
+            client_secret_hash: String::new(),
+            name,
+            scopes,
+            created_at,
+            revoked: revoked != 0,
+        });
+    }
+    Ok(clients)
+}
+
+/// Revoke an OAuth client. Returns true if a row was updated, false if not found.
+pub async fn revoke_client(db: &SqlitePool, client_id: &str) -> Result<bool, AgentIAMError> {
+    let result = sqlx::query("UPDATE oauth_clients SET revoked = 1 WHERE client_id = ?")
+        .bind(client_id)
+        .execute(db)
+        .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 #[cfg(test)]
@@ -302,5 +338,40 @@ mod tests {
             jwt::verify_token(&token, JWT_SECRET).unwrap();
         assert_eq!(data.claims.scope, "authorize sessions:read");
         assert_eq!(data.claims.agentiam.client_id, client.client_id);
+    }
+
+    #[tokio::test]
+    async fn test_list_clients() {
+        let db = setup_db().await;
+        let scopes = vec!["authorize".to_string()];
+        register_client(&db, "app-a", scopes.clone()).await.unwrap();
+        register_client(&db, "app-b", scopes).await.unwrap();
+
+        let clients = list_clients(&db).await.unwrap();
+        assert_eq!(clients.len(), 2);
+        let names: Vec<&str> = clients.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"app-a"));
+        assert!(names.contains(&"app-b"));
+        // Secret hash must not be exposed
+        assert!(clients[0].client_secret_hash.is_empty());
+        assert!(clients[1].client_secret_hash.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_revoke_client() {
+        let db = setup_db().await;
+        let scopes = vec!["authorize".to_string()];
+        let (client, _) = register_client(&db, "revoke-me", scopes).await.unwrap();
+
+        let revoked = revoke_client(&db, &client.client_id).await.unwrap();
+        assert!(revoked);
+
+        // Not found case
+        let revoked2 = revoke_client(&db, "nonexistent").await.unwrap();
+        assert!(!revoked2);
+
+        // Verify it shows as revoked in list
+        let clients = list_clients(&db).await.unwrap();
+        assert!(clients[0].revoked);
     }
 }

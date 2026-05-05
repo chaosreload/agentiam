@@ -10,5 +10,4 @@ pub mod metadata;
 pub mod models;
 #[allow(dead_code)]
 pub mod session;
-#[allow(dead_code)]
 pub mod token;
